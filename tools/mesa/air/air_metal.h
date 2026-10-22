@@ -190,6 +190,63 @@ int rwa_texture_read(struct rwa_texture *texture, unsigned level, unsigned layer
 		     size_t stride, char *why, size_t why_size);
 
 /*
+ * BLITS: what an MTLBlitCommandEncoder records, carried out on the device's own context in
+ * the order the command buffer gives them, after the work committed before them and
+ * before the work committed after (the driver calls them from -commit like a dispatch).
+ *
+ *   rwa_copy_buffer          -copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:,
+ *                            on the GPU (resource_copy_region)
+ *   rwa_fill_buffer          -fillBuffer:range:value:
+ *   rwa_copy_texture         -copyFromTexture:...toTexture:..., one slice and level of a
+ *                            region, on the GPU; the two formats must have the same texel
+ *                            size, which is Metal's own rule for this copy
+ *   rwa_copy_buffer_to_texture / rwa_copy_texture_to_buffer
+ *                            -copyFromBuffer:...toTexture: and back, with Metal's
+ *                            bytesPerRow and bytesPerImage. These go through the
+ *                            processor (Gallium has no buffer<->texture copy), each side
+ *                            mapped the synchronised way, so a buffer the GPU wrote earlier
+ *                            in the same command buffer is read only after it was written
+ *   rwa_generate_mipmaps     -generateMipmapsForTexture:, every level from level 0 with a
+ *                            linear filter (util_gen_mipmap)
+ *
+ * 0, or -1 and a sentence.
+ */
+int rwa_copy_buffer(struct rwa_buffer *src, size_t src_offset, struct rwa_buffer *dst,
+		    size_t dst_offset, size_t size, char *why, size_t why_size);
+int rwa_fill_buffer(struct rwa_buffer *buffer, size_t offset, size_t size, uint8_t value,
+		    char *why, size_t why_size);
+int rwa_copy_texture(struct rwa_texture *src, unsigned src_layer, unsigned src_level,
+		     const unsigned src_origin[3], const unsigned size[3],
+		     struct rwa_texture *dst, unsigned dst_layer, unsigned dst_level,
+		     const unsigned dst_origin[3], char *why, size_t why_size);
+int rwa_copy_buffer_to_texture(struct rwa_buffer *src, size_t src_offset, size_t row_bytes,
+			       size_t image_bytes, const unsigned size[3],
+			       struct rwa_texture *dst, unsigned dst_layer, unsigned dst_level,
+			       const unsigned dst_origin[3], char *why, size_t why_size);
+int rwa_copy_texture_to_buffer(struct rwa_texture *src, unsigned src_layer,
+			       unsigned src_level, const unsigned src_origin[3],
+			       const unsigned size[3], struct rwa_buffer *dst, size_t dst_offset,
+			       size_t row_bytes, size_t image_bytes, char *why, size_t why_size);
+int rwa_generate_mipmaps(struct rwa_texture *texture, char *why, size_t why_size);
+
+/*
+ * What a render pass does besides its draws: its clear when it draws nothing (a pass with
+ * draws clears in the first of them, rwa_draw.clear_color), and its multisample resolve at
+ * the end (MTLStoreActionMultisampleResolve, resolveTexture). Level 0, every slice of it.
+ *   rwa_clear_color          MTLLoadActionClear of a colour attachment: rgba as Metal's
+ *                            clearColor, converted for an integer format as Metal does
+ *   rwa_clear_depth_stencil  either aspect, NULL for one that keeps its contents
+ *   rwa_resolve_texture      the samples of `src` averaged into the one-sample `dst`
+ * 0, or -1 and a sentence.
+ */
+int rwa_clear_color(struct rwa_texture *texture, const double rgba[4], char *why,
+		    size_t why_size);
+int rwa_clear_depth_stencil(struct rwa_texture *texture, const float *depth,
+			    const unsigned *stencil, char *why, size_t why_size);
+int rwa_resolve_texture(struct rwa_texture *src, struct rwa_texture *dst, char *why,
+			size_t why_size);
+
+/*
  * What a depth/stencil texture holds, by aspect, which is the reading rwa_texture_read
  * cannot give.
  *
@@ -577,6 +634,27 @@ int rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings 
 
 /* Wait for everything dispatched so far, with a real fence. 0, or -1 and a sentence. */
 int rwa_finish(struct rwa_device *device, char *why, size_t why_size);
+
+/*
+ * WAITING ONCE PER SUBMISSION INSTEAD OF ONCE PER CALL.
+ *
+ * By default every rwa_dispatch_buffers and rwa_render_draw waits for its own fence, which
+ * is what air_run needs: it reads the mapped buffers the moment the call returns. A driver
+ * that has its own completion -- a Metal command buffer -- passes `defer` nonzero, and then
+ * those calls only record; the work goes to the GPU at rwa_flush, and a failure surfaces
+ * at the wait on that fence rather than at the call that caused it.
+ *
+ * rwa_flush submits everything recorded and hands back a fence for it (NULL in *fence when
+ * there was nothing to wait for). rwa_fence_wait may be called from any thread, and more
+ * than once; rwa_fence_release drops the reference rwa_flush gave. The rest of this
+ * contract still belongs to one thread at a time, as before.
+ */
+struct rwa_fence;
+void rwa_device_defer_waits(struct rwa_device *device, int defer);
+int rwa_flush(struct rwa_device *device, struct rwa_fence **fence, char *why, size_t why_size);
+int rwa_fence_wait(struct rwa_device *device, struct rwa_fence *fence, char *why,
+		   size_t why_size);
+void rwa_fence_release(struct rwa_device *device, struct rwa_fence *fence);
 
 /*
  * ---------------------------------------------------------------------------------------

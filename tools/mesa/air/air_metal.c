@@ -57,6 +57,7 @@
 #include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "util/u_inlines.h"
+#include "util/u_gen_mipmap.h"
 #include "util/u_sampler.h"
 #include "util/u_debug.h"
 
@@ -116,6 +117,9 @@ struct rwa_device {
     * construction: a buffer joins only when something is encoded into it.
     */
    struct rwa_buffer *encoded;
+
+   /* rwa_device_defer_waits: draws and dispatches record only, and rwa_flush submits */
+   bool defer_waits;
 };
 
 /*
@@ -1296,6 +1300,11 @@ texture_of_shape(struct rwa_device *device, const struct rwa_texture_shape *shap
       bind = PIPE_BIND_SAMPLER_VIEW;
       read = true;
    }
+   /* A multisample colour target is resolved through a sampler (util_blitter), and
+    * CoreAnimation makes its 4-sample layer render-target only: so it may always be sampled.
+    */
+   if (multisample && (bind & PIPE_BIND_RENDER_TARGET))
+      bind |= PIPE_BIND_SAMPLER_VIEW;
 
    /* Gallium counts a texture that is not multisampled as zero samples, not one,
     * everywhere a sample count is asked for -- and the difference is not cosmetic here.
@@ -1351,6 +1360,9 @@ texture_of_shape(struct rwa_device *device, const struct rwa_texture_shape *shap
       .target = target, .format = fmt->pipe,
       .width0 = width, .height0 = height, .depth0 = depth,
       .array_size = array_size, .last_level = mips - 1, .nr_samples = query_samples,
+      /* stored as many as there are: a driver's format check (and so util_blitter's, which a
+       * resolve goes through) refuses a sample count that differs from the storage count */
+      .nr_storage_samples = query_samples,
       .bind = bind, .usage = PIPE_USAGE_DEFAULT };
 
    if (import) {
@@ -1662,6 +1674,350 @@ rwa_texture_write(struct rwa_texture *texture, unsigned level, unsigned layer,
    texture->device->pipe->texture_subdata(texture->device->pipe, texture->res, level,
                                           PIPE_MAP_WRITE, &box, bytes, row,
                                           row * box.height);
+   return 0;
+}
+
+/*
+ * ---------------------------------------------------------------------------------------
+ * Blits (air_metal.h). The copies that Gallium has are done by the GPU, in the context's
+ * order; the two it has not (buffer <-> texture) map both sides the synchronised way, which
+ * is what makes a buffer the GPU wrote earlier in the same command buffer readable here.
+ */
+static bool
+buffer_range(const struct rwa_buffer *buffer, size_t offset, size_t size, const char *what,
+             char *why, size_t why_size)
+{
+   if (!buffer) {
+      say(why, why_size, "no %s buffer", what);
+      return false;
+   }
+   if (offset > buffer->size || size > buffer->size - offset) {
+      say(why, why_size, "%zu bytes at %zu of a %s buffer of %zu", size, offset, what,
+          buffer->size);
+      return false;
+   }
+   return true;
+}
+
+int
+rwa_copy_buffer(struct rwa_buffer *src, size_t src_offset, struct rwa_buffer *dst,
+                size_t dst_offset, size_t size, char *why, size_t why_size)
+{
+   struct pipe_box box;
+
+   if (!buffer_range(src, src_offset, size, "source", why, why_size) ||
+       !buffer_range(dst, dst_offset, size, "destination", why, why_size))
+      return -1;
+   if (size == 0)
+      return 0;
+   u_box_1d(src_offset, size, &box);
+   src->device->pipe->resource_copy_region(src->device->pipe, dst->res, 0, dst_offset, 0, 0,
+                                           src->res, 0, &box);
+   return 0;
+}
+
+int
+rwa_fill_buffer(struct rwa_buffer *buffer, size_t offset, size_t size, uint8_t value,
+                char *why, size_t why_size)
+{
+   struct pipe_context *pipe;
+
+   if (!buffer_range(buffer, offset, size, "filled", why, why_size))
+      return -1;
+   if (size == 0)
+      return 0;
+   pipe = buffer->device->pipe;
+   if (pipe->clear_buffer) {
+      pipe->clear_buffer(pipe, buffer->res, offset, size, &value, 1);
+   } else {
+      struct pipe_transfer *xfer;
+      void *at = pipe_buffer_map_range(pipe, buffer->res, offset, size, PIPE_MAP_WRITE, &xfer);
+
+      if (!at) {
+         say(why, why_size, "the buffer to fill could not be mapped");
+         return -1;
+      }
+      memset(at, value, size);
+      pipe_buffer_unmap(pipe, xfer);
+   }
+   return 0;
+}
+
+int
+rwa_copy_texture(struct rwa_texture *src, unsigned src_layer, unsigned src_level,
+                 const unsigned src_origin[3], const unsigned size[3],
+                 struct rwa_texture *dst, unsigned dst_layer, unsigned dst_level,
+                 const unsigned dst_origin[3], char *why, size_t why_size)
+{
+   struct pipe_box from, to;
+
+   if (!src || !dst) {
+      say(why, why_size, "a texture copy needs both textures");
+      return -1;
+   }
+   if (util_format_get_blocksize(src->res->format) != util_format_get_blocksize(dst->res->format)) {
+      say(why, why_size, "a copy from %s to %s: Metal copies between formats of the same "
+                         "texel size only", src->format_name, dst->format_name);
+      return -1;
+   }
+   if (src->res->nr_samples != dst->res->nr_samples) {
+      say(why, why_size, "a copy between textures of %u and %u samples: that is a resolve, "
+                         "not a copy", src->res->nr_samples, dst->res->nr_samples);
+      return -1;
+   }
+   if (!texture_box(src, src_level, src_layer, src_origin, size, &from, why, why_size) ||
+       !texture_box(dst, dst_level, dst_layer, dst_origin, size, &to, why, why_size))
+      return -1;
+   src->device->pipe->resource_copy_region(src->device->pipe, dst->res, dst_level, to.x, to.y,
+                                           to.z, src->res, src_level, &from);
+   return 0;
+}
+
+/* The bytes of one region of a texture as Metal lays them out in a buffer: rows of
+ * row_bytes (0: packed), images of image_bytes (0: packed) -- and how many bytes that is. */
+static bool
+buffer_layout(const struct rwa_texture *texture, const struct pipe_box *box, size_t *row_bytes,
+              size_t *image_bytes, size_t *total, char *why, size_t why_size)
+{
+   if (!caller_stride(texture, box, *row_bytes, row_bytes, why, why_size))
+      return false;
+   size_t least = *row_bytes * box->height;
+   if (*image_bytes == 0)
+      *image_bytes = least;
+   if (*image_bytes < least) {
+      say(why, why_size, "%zu bytes per image for %u rows of %zu bytes", *image_bytes,
+          box->height, *row_bytes);
+      return false;
+   }
+   *total = *image_bytes * (box->depth - 1) + least;
+   return true;
+}
+
+static bool
+plain_texture(const struct rwa_texture *texture, const char *what, char *why, size_t why_size)
+{
+   if (format_is_depth_stencil(texture->res->format) || texture->res->nr_samples > 1) {
+      say(why, why_size, "a copy between a buffer and the %s %s texture%s: its texels are "
+                         "not bytes in one order a buffer can hold", what,
+          texture->format_name, texture->res->nr_samples > 1 ? " (multisample)" : "");
+      return false;
+   }
+   return true;
+}
+
+int
+rwa_copy_buffer_to_texture(struct rwa_buffer *src, size_t src_offset, size_t row_bytes,
+                           size_t image_bytes, const unsigned size[3],
+                           struct rwa_texture *dst, unsigned dst_layer, unsigned dst_level,
+                           const unsigned dst_origin[3], char *why, size_t why_size)
+{
+   struct pipe_context *pipe;
+   struct pipe_transfer *xfer;
+   struct pipe_box box;
+   size_t total;
+   const uint8_t *from;
+
+   if (!src || !dst || !plain_texture(dst, "destination", why, why_size) ||
+       !texture_box(dst, dst_level, dst_layer, dst_origin, size, &box, why, why_size) ||
+       !buffer_layout(dst, &box, &row_bytes, &image_bytes, &total, why, why_size) ||
+       !buffer_range(src, src_offset, total, "source", why, why_size))
+      return -1;
+   pipe = dst->device->pipe;
+   /* READ, not UNSYNCHRONIZED: freedreno waits for whatever earlier work writes this buffer */
+   from = pipe_buffer_map_range(pipe, src->res, src_offset, total, PIPE_MAP_READ, &xfer);
+   if (!from) {
+      say(why, why_size, "the source buffer could not be mapped for reading");
+      return -1;
+   }
+   pipe->texture_subdata(pipe, dst->res, dst_level, PIPE_MAP_WRITE, &box, from, row_bytes,
+                         image_bytes);
+   pipe_buffer_unmap(pipe, xfer);
+   return 0;
+}
+
+int
+rwa_copy_texture_to_buffer(struct rwa_texture *src, unsigned src_layer, unsigned src_level,
+                           const unsigned src_origin[3], const unsigned size[3],
+                           struct rwa_buffer *dst, size_t dst_offset, size_t row_bytes,
+                           size_t image_bytes, char *why, size_t why_size)
+{
+   struct pipe_context *pipe;
+   struct pipe_transfer *in, *out;
+   struct pipe_box box;
+   size_t total, row;
+   const uint8_t *from;
+   uint8_t *to;
+
+   if (!src || !dst || !plain_texture(src, "source", why, why_size) ||
+       !texture_box(src, src_level, src_layer, src_origin, size, &box, why, why_size) ||
+       !buffer_layout(src, &box, &row_bytes, &image_bytes, &total, why, why_size) ||
+       !buffer_range(dst, dst_offset, total, "destination", why, why_size))
+      return -1;
+   pipe = src->device->pipe;
+   from = pipe_texture_map_3d(pipe, src->res, src_level, PIPE_MAP_READ, box.x, box.y, box.z,
+                              box.width, box.height, box.depth, &in);
+   if (!from) {
+      say(why, why_size, "the %s texture could not be mapped for reading", src->format_name);
+      return -1;
+   }
+   to = pipe_buffer_map_range(pipe, dst->res, dst_offset, total, PIPE_MAP_WRITE, &out);
+   if (!to) {
+      pipe_texture_unmap(pipe, in);
+      say(why, why_size, "the destination buffer could not be mapped for writing");
+      return -1;
+   }
+   row = (size_t)box.width * util_format_get_blocksize(src->res->format);
+   for (int z = 0; z < box.depth; z++) {
+      for (int y = 0; y < box.height; y++) {
+         memcpy(to + z * image_bytes + y * row_bytes,
+                from + z * in->layer_stride + y * in->stride, row);
+      }
+   }
+   pipe_buffer_unmap(pipe, out);
+   pipe_texture_unmap(pipe, in);
+   return 0;
+}
+
+int
+rwa_generate_mipmaps(struct rwa_texture *texture, char *why, size_t why_size)
+{
+   struct pipe_resource *res;
+
+   if (!texture) {
+      say(why, why_size, "no texture to make the levels of");
+      return -1;
+   }
+   res = texture->res;
+   if (res->last_level == 0)
+      return 0;               /* Metal: a texture of one level has nothing to generate */
+   if (!util_gen_mipmap(texture->device->pipe, res, res->format, 0, res->last_level, 0,
+                        res->target == PIPE_TEXTURE_3D ? 0 : texture->layers - 1,
+                        PIPE_TEX_FILTER_LINEAR)) {
+      say(why, why_size, "the GPU driver could not make the levels of a %s texture",
+          texture->format_name);
+      return -1;
+   }
+   return 0;
+}
+
+/* A render surface over level 0 of a texture, every slice of it. NULL and a sentence. */
+static struct pipe_surface *
+whole_surface(struct rwa_texture *t, char *why, size_t why_size)
+{
+   struct pipe_surface tmpl = { .format = t->res->format };
+   struct pipe_surface *surf;
+
+   tmpl.u.tex.level = 0;
+   tmpl.u.tex.first_layer = 0;
+   tmpl.u.tex.last_layer = t->res->target == PIPE_TEXTURE_3D ? t->res->depth0 - 1
+                                                             : t->layers - 1;
+   surf = t->device->pipe->create_surface(t->device->pipe, t->res, &tmpl);
+   if (!surf)
+      say(why, why_size, "%s would not make a render surface of a %s texture",
+          rwa_device_name(t->device), t->format_name);
+   return surf;
+}
+
+int
+rwa_clear_color(struct rwa_texture *texture, const double rgba[4], char *why, size_t why_size)
+{
+   union pipe_color_union color;
+   struct pipe_surface *surf;
+
+   if (!texture || !rgba) {
+      say(why, why_size, "a clear needs a texture and a colour");
+      return -1;
+   }
+   if (util_format_is_pure_uint(texture->res->format)) {
+      for (int i = 0; i < 4; i++)
+         color.ui[i] = (uint32_t)rgba[i];
+   } else if (util_format_is_pure_sint(texture->res->format)) {
+      for (int i = 0; i < 4; i++)
+         color.i[i] = (int32_t)rgba[i];
+   } else {
+      for (int i = 0; i < 4; i++)
+         color.f[i] = (float)rgba[i];
+   }
+   if (!(surf = whole_surface(texture, why, why_size)))
+      return -1;
+   texture->device->pipe->clear_render_target(texture->device->pipe, surf, &color, 0, 0,
+                                              surf->width, surf->height, false);
+   pipe_surface_reference(&surf, NULL);   /* the batch may hold its own reference */
+   return 0;
+}
+
+int
+rwa_clear_depth_stencil(struct rwa_texture *texture, const float *depth,
+                        const unsigned *stencil, char *why, size_t why_size)
+{
+   struct pipe_surface *surf;
+   unsigned flags = (depth && format_has_depth(texture->res->format) ? PIPE_CLEAR_DEPTH : 0) |
+                    (stencil && format_has_stencil(texture->res->format) ? PIPE_CLEAR_STENCIL : 0);
+
+   if (!flags)
+      return 0;
+   if (!(surf = whole_surface(texture, why, why_size)))
+      return -1;
+   texture->device->pipe->clear_depth_stencil(texture->device->pipe, surf, flags,
+                                              depth ? *depth : 0, stencil ? *stencil : 0, 0, 0,
+                                              surf->width, surf->height, false);
+   pipe_surface_reference(&surf, NULL);   /* the batch may hold its own reference */
+   return 0;
+}
+
+int
+rwa_resolve_texture(struct rwa_texture *src, struct rwa_texture *dst, char *why, size_t why_size)
+{
+   struct pipe_blit_info blit;
+
+   if (!src || !dst) {
+      say(why, why_size, "a resolve needs both textures");
+      return -1;
+   }
+   if (dst->res->nr_samples > 1) {
+      say(why, why_size, "a resolve into a %s texture of %u samples: Metal resolves into one "
+                         "sample", dst->format_name, dst->res->nr_samples);
+      return -1;
+   }
+   if (src->res->width0 > dst->res->width0 || src->res->height0 > dst->res->height0) {
+      say(why, why_size, "a resolve of %ux%u into %ux%u", src->res->width0, src->res->height0,
+          dst->res->width0, dst->res->height0);
+      return -1;
+   }
+   /* Gallium's blit returns nothing, and freedreno drops one its blitter cannot do without a
+    * word (fd_blit: "blit unsupported"), which would read as a resolve of black: so the two
+    * conditions util_blitter_is_blit_supported tests first are asked here, out loud. */
+   struct pipe_screen *screen = src->device->screen;
+   if (!screen->is_format_supported(screen, src->res->format, src->res->target,
+                                    src->res->nr_samples, src->res->nr_storage_samples,
+                                    PIPE_BIND_SAMPLER_VIEW)) {
+      say(why, why_size, "%s cannot sample a %s texture of %u samples, which its resolve "
+                         "reads", rwa_device_name(src->device), src->format_name,
+          src->res->nr_samples);
+      return -1;
+   }
+   if (!screen->is_format_supported(screen, dst->res->format, dst->res->target, 0, 0,
+                                    PIPE_BIND_RENDER_TARGET)) {
+      say(why, why_size, "%s cannot render into a %s texture, which a resolve writes",
+          rwa_device_name(src->device), dst->format_name);
+      return -1;
+   }
+   if (!(src->res->bind & PIPE_BIND_SAMPLER_VIEW) || !(dst->res->bind & PIPE_BIND_RENDER_TARGET)) {
+      say(why, why_size, "a resolve from a %s texture made without sampling (bind %#x) into one "
+                         "made without rendering (bind %#x)", src->format_name, src->res->bind,
+          dst->res->bind);
+      return -1;
+   }
+   memset(&blit, 0, sizeof(blit));
+   blit.src.resource = src->res;
+   blit.src.format = src->res->format;
+   blit.dst.resource = dst->res;
+   blit.dst.format = dst->res->format;
+   u_box_2d(0, 0, src->res->width0, src->res->height0, &blit.src.box);
+   blit.dst.box = blit.src.box;
+   blit.mask = util_format_get_mask(dst->res->format);
+   blit.filter = PIPE_TEX_FILTER_NEAREST;
+   src->device->pipe->blit(src->device->pipe, &blit);
    return 0;
 }
 
@@ -2470,7 +2826,8 @@ buffer_offset_ok(const struct rwa_device *device, const struct air_resource *r,
           what, offset, b->size);
       return -1;
    }
-   if (r->kind == AIR_RESOURCE_DEVICE_BUFFER &&
+   /* (one the shader only READS is served by a copy: bind_stage) */
+   if (r->kind == AIR_RESOURCE_DEVICE_BUFFER && r->write &&
        offset % device->ssbo_offset_align != 0) {
       say(why, why_size, "%s is bound at offset %zu, and %s declares it in the `device` "
                          "address space, whose offsets this GPU fetches in multiples of "
@@ -3565,6 +3922,10 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
     */
    struct pipe_shader_buffer sb[PIPE_MAX_SHADER_BUFFERS] = { 0 };
    unsigned num_ssbo = 0, writable = 0;
+   /* copies of read-only buffers bound at offsets the GPU cannot fetch from (below).
+    * shortcut: a refusal after one is made returns without releasing it; free them on those paths if refusals become frequent */
+   struct pipe_resource *copies[PIPE_MAX_SHADER_BUFFERS];
+   unsigned num_copies = 0;
 
    /* and each texture as the kind of view its own instructions ask for. A read-only
     * texture stays a texture: Metal's read() on one becomes a txf, a texture fetch, so
@@ -3628,13 +3989,44 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
          sb[r->index].buffer = b->res;
          /* Metal's own `offset:`, for a member of a set and for a buffer argument
           * alike, and an offset this GPU cannot fetch from has already been refused by
-          * name (buffer_offset_ok: a `device` buffer may be written, so the upload that
+          * name when the shader writes the buffer (buffer_offset_ok: the upload that
           * serves a `constant` one would lose the writes). The SIZE is what is left of
           * the buffer after the offset, so a shader reading past its own block reads
           * past its binding rather than into the next one.
           */
          sb[r->index].buffer_offset = (unsigned)boffset;
          sb[r->index].buffer_size = b->size - MIN2(b->size, boffset);
+         /*
+          * A `device` buffer the shader only READS, at an offset this GPU cannot fetch
+          * from (CoreAnimation's and the widgets' vertex shaders pack their vertices so):
+          * the range is copied, on the GPU and in this context's order, into a buffer of
+          * its own bound at 0. Nothing is written back because nothing writes it, so the
+          * shader reads exactly the bytes it would have at that offset.
+          */
+         if (!r->write && boffset % b->device->ssbo_offset_align != 0) {
+            unsigned size = r->size ? MIN2(r->size, sb[r->index].buffer_size)
+                                    : sb[r->index].buffer_size;
+            struct pipe_resource *copy = size ? pipe_buffer_create(b->device->screen,
+                                                                   PIPE_BIND_SHADER_BUFFER,
+                                                                   PIPE_USAGE_STREAM, size)
+                                              : NULL;
+            struct pipe_box box;
+
+            if (!copy) {
+               say(why, why_size, "%s reads buffer %u at offset %zu, which this GPU fetches "
+                                  "only in multiples of %u bytes, and a copy of its %u bytes "
+                                  "could not be allocated", name, r->index, boffset,
+                   b->device->ssbo_offset_align, size);
+               return -1;
+            }
+            u_box_1d((unsigned)boffset, size, &box);
+            b->device->pipe->resource_copy_region(b->device->pipe, copy, 0, 0, 0, 0, b->res,
+                                                  0, &box);
+            sb[r->index].buffer = copy;
+            sb[r->index].buffer_offset = 0;
+            sb[r->index].buffer_size = size;
+            copies[num_copies++] = copy;   /* the binding takes its own reference below */
+         }
          num_ssbo = MAX2(num_ssbo, r->index + 1);
          if (r->write)
             writable |= 1u << r->index;
@@ -3798,6 +4190,9 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
 
    if (num_ssbo)
       pipe->set_shader_buffers(pipe, stage, 0, num_ssbo, sb, writable);
+   /* bound, so referenced by the context until the next binding replaces them */
+   for (unsigned i = 0; i < num_copies; i++)
+      pipe_resource_reference(&copies[i], NULL);
    if (num_views)
       pipe->set_sampler_views(pipe, stage, 0, num_views, 0, false, views);
    if (num_images)
@@ -3930,7 +4325,8 @@ rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings *bin
     * and call it a result. rwa_finish is for a caller that wants to wait again, or to
     * wait for work dispatched through another pipeline of the same device.
     */
-   int rc = finish_or_say_why(device, true, "dispatch", why, why_size);
+   int rc = device->defer_waits ? 0 :
+            finish_or_say_why(device, true, "dispatch", why, why_size);
    unbind_stage(device, PIPE_SHADER_COMPUTE, &bound);
    return rc;
 }
@@ -3939,6 +4335,48 @@ int
 rwa_finish(struct rwa_device *device, char *why, size_t why_size)
 {
    return finish_or_say_why(device, false, "work", why, why_size);
+}
+
+void
+rwa_device_defer_waits(struct rwa_device *device, int defer)
+{
+   device->defer_waits = defer != 0;
+}
+
+int
+rwa_flush(struct rwa_device *device, struct rwa_fence **fence, char *why, size_t why_size)
+{
+   struct pipe_fence_handle *handle = NULL;
+   device->pipe->flush(device->pipe, &handle, 0);
+   *fence = (struct rwa_fence *)handle;
+   (void)why;
+   (void)why_size;
+   return 0;
+}
+
+int
+rwa_fence_wait(struct rwa_device *device, struct rwa_fence *fence, char *why,
+               size_t why_size)
+{
+   if (!fence)
+      return 0;
+   /* no context: the fence was flushed when it was made, so this may run on any thread */
+   if (!device->screen->fence_finish(device->screen, NULL, (struct pipe_fence_handle *)fence,
+                                     RWA_FENCE_TIMEOUT_NS)) {
+      say(why, why_size, "the GPU did not finish a submission within two seconds; what it "
+                         "wrote is not a result, and one timeout wedges this GPU for the "
+                         "rest of the boot (docs/air.md section 5)");
+      return -1;
+   }
+   return 0;
+}
+
+void
+rwa_fence_release(struct rwa_device *device, struct rwa_fence *fence)
+{
+   struct pipe_fence_handle *handle = (struct pipe_fence_handle *)fence;
+   if (handle)
+      device->screen->fence_reference(device->screen, &handle, NULL);
 }
 
 /*
@@ -6971,7 +7409,7 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
     * come back (docs/air.md section 5). A link error between the stages, which ir3 only
     * finds now, surfaces as this not finishing.
     */
-   rc = finish_or_say_why(device, true, "draw", why, why_size);
+   rc = device->defer_waits ? 0 : finish_or_say_why(device, true, "draw", why, why_size);
 
 unbind:
    unbind_stage(device, PIPE_SHADER_FRAGMENT, &fbound);
@@ -6983,10 +7421,9 @@ unbind:
     * sampler state (rwa_sampler_destroy).
     */
    pipe->set_framebuffer_state(pipe, &(struct pipe_framebuffer_state){ 0 });
+   /* by reference, not surface_destroy: a batch not yet waited for still holds them */
    for (unsigned i = 0; i < draw->color_count; i++)
-      if (surf[i])
-         pipe->surface_destroy(pipe, surf[i]);
-   if (zsurf)
-      pipe->surface_destroy(pipe, zsurf);
+      pipe_surface_reference(&surf[i], NULL);
+   pipe_surface_reference(&zsurf, NULL);
    return rc;
 }

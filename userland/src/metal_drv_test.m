@@ -885,6 +885,8 @@ static bool argbuf;
  * number that is quietly a quarter of the answer.
  */
 static unsigned draw_from, draw_count = 60;
+/* --blit: the blit encoder alone (blit_test), then stop */
+static bool blit_only;
 /* --seed-rows writes the draw's 4x4 texture one row at a time, at a non-zero region origin,
  * which is how this test used to do it always. It is a flag now because that made every
  * measurement of that texture depend on the driver's origin.y, and because four rows landing
@@ -3513,6 +3515,238 @@ fault(int sig, siginfo_t *info, void *uap)
 	}
 	fflush(stdout);
 	_exit(sig);
+}
+
+/*
+ * --blit: every kind of copy an MTLBlitCommandEncoder makes, through Metal's own API, each
+ * read back and compared with bytes computed here -- in one command buffer per check, so a
+ * failure names the call. RGBA8Unorm so a texel is four bytes and survives every copy exactly.
+ */
+static int
+blit_test(id<MTLDevice> dev)
+{
+	id<MTLCommandQueue> queue = [dev newCommandQueue];
+	id<MTLBuffer> a = [dev newBufferWithLength:65536 options:MTLResourceStorageModeShared];
+	id<MTLBuffer> b = [dev newBufferWithLength:65536 options:MTLResourceStorageModeShared];
+	uint8_t *pa = [a contents], *pb = [b contents];
+	int failed = 0;
+
+#define BLIT_RUN(encode) ({ \
+		id<MTLCommandBuffer> cb = [queue commandBuffer]; \
+		id<MTLBlitCommandEncoder> enc = [cb blitCommandEncoder]; \
+		if (enc == nil) { printf("drvtest: blit: blitCommandEncoder is nil\n"); return 1; } \
+		encode; \
+		[enc endEncoding]; [cb commit]; [cb waitUntilCompleted]; \
+		[cb status] == MTLCommandBufferStatusCompleted ? nil : [cb error]; })
+#define BLIT_CHECK(what, ok, err) do { \
+		printf("drvtest: blit: %-48s %s%s%s\n", what, (ok) ? "ok" : "WRONG", \
+		       (err) ? " -- " : "", (err) ? [[(err) localizedDescription] UTF8String] : ""); \
+		failed |= !(ok); \
+	} while (0)
+
+	if (queue == nil || a == nil || b == nil) {
+		printf("drvtest: blit: no queue or buffers\n");
+		return 1;
+	}
+	for (unsigned i = 0; i < 65536; i++) {
+		pa[i] = (uint8_t)(i * 7 + 13);
+	}
+	memset(pb, 0, 65536);
+
+	NSError *err = BLIT_RUN([enc copyFromBuffer:a sourceOffset:100 toBuffer:b
+				  destinationOffset:300 size:1000]);
+	bool ok = err == nil && pb[299] == 0 && pb[1300] == 0;
+	for (unsigned i = 0; i < 1000; i++) {
+		ok &= pb[300 + i] == pa[100 + i];
+	}
+	BLIT_CHECK("copyFromBuffer 1000 bytes, 100 -> 300", ok, err);
+
+	err = BLIT_RUN([enc fillBuffer:b range:NSMakeRange(64, 128) value:0xa5]);
+	ok = err == nil && pb[63] == 0 && pb[192] == 0;
+	for (unsigned i = 64; i < 192; i++) {
+		ok &= pb[i] == 0xa5;
+	}
+	BLIT_CHECK("fillBuffer 128 bytes of 0xa5 at 64", ok, err);
+
+	MTLTextureDescriptor *td = [MTLTextureDescriptor
+	    texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64
+				     mipmapped:YES];
+	td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+	id<MTLTexture> t = [dev newTextureWithDescriptor:td], u = [dev newTextureWithDescriptor:td];
+	if (t == nil || u == nil) {
+		printf("drvtest: blit: newTextureWithDescriptor: nil\n");
+		return 1;
+	}
+	memset(pb, 0, 65536);
+	err = BLIT_RUN(({
+		[enc copyFromBuffer:a sourceOffset:8 sourceBytesPerRow:160 sourceBytesPerImage:0
+			 sourceSize:MTLSizeMake(16, 8, 1) toTexture:t destinationSlice:0
+		   destinationLevel:0 destinationOrigin:MTLOriginMake(4, 2, 0)];
+		[enc copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(4, 2, 0)
+			  sourceSize:MTLSizeMake(16, 8, 1) toBuffer:b destinationOffset:0
+		  destinationBytesPerRow:64 destinationBytesPerImage:0];
+	}));
+	ok = err == nil;
+	for (unsigned y = 0; y < 8; y++) {
+		for (unsigned x = 0; x < 64; x++) {
+			ok &= pb[y * 64 + x] == pa[8 + y * 160 + x];
+		}
+	}
+	BLIT_CHECK("buffer -> texture -> buffer, 16x8, rows 160/64", ok, err);
+
+	memset(pb, 0, 65536);
+	err = BLIT_RUN(({
+		[enc copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(4, 2, 0)
+			  sourceSize:MTLSizeMake(16, 8, 1) toTexture:u destinationSlice:0
+		    destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[enc copyFromTexture:u sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			  sourceSize:MTLSizeMake(16, 8, 1) toBuffer:b destinationOffset:0
+		  destinationBytesPerRow:0 destinationBytesPerImage:0];
+	}));
+	ok = err == nil;
+	for (unsigned y = 0; y < 8; y++) {
+		for (unsigned x = 0; x < 64; x++) {
+			ok &= pb[y * 64 + x] == pa[8 + y * 160 + x];
+		}
+	}
+	BLIT_CHECK("copyFromTexture 16x8, (4,2) -> (0,0)", ok, err);
+
+	for (unsigned i = 0; i < 64 * 64; i++) {
+		memcpy(pa + 4 * i, (uint8_t[]){ 200, 100, 50, 255 }, 4);
+	}
+	memset(pb, 0, 16);
+	err = BLIT_RUN(({
+		[enc copyFromBuffer:a sourceOffset:0 sourceBytesPerRow:256 sourceBytesPerImage:0
+			 sourceSize:MTLSizeMake(64, 64, 1) toTexture:u destinationSlice:0
+		   destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[enc generateMipmapsForTexture:u];
+		[enc copyFromTexture:u sourceSlice:0 sourceLevel:6 sourceOrigin:MTLOriginMake(0, 0, 0)
+			  sourceSize:MTLSizeMake(1, 1, 1) toBuffer:b destinationOffset:0
+		  destinationBytesPerRow:0 destinationBytesPerImage:0];
+	}));
+	printf("drvtest: blit: level 6 of %lu reads %u %u %u %u\n",
+	       (unsigned long)[u mipmapLevelCount], pb[0], pb[1], pb[2], pb[3]);
+	ok = err == nil && pb[0] == 200 && pb[1] == 100 && pb[2] == 50 && pb[3] == 255;
+	BLIT_CHECK("generateMipmaps: level 6 of a uniform 64x64", ok, err);
+
+	/*
+	 * RENDER PASSES, read back through the blit path just checked: a pass that clears and
+	 * draws nothing, a pass that clears and draws twice (the second draw must not clear
+	 * again), and a 4-sample pass resolved into a one-sample texture -- once clearing only,
+	 * once drawing. Apple's clearFragment01 with the generated quad, as RedwoodTriangle draws,
+	 * reading its colour from buffer 14: vertices 0-2 are one half of the quad, 1-3 the other.
+	 */
+	{
+		NSData *data = [NSData dataWithContentsOfFile:
+		    @"/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib"];
+		dispatch_data_t wrapped = data ? dispatch_data_create([data bytes], [data length], NULL,
+		    DISPATCH_DATA_DESTRUCTOR_DEFAULT) : NULL;
+		id<MTLLibrary> lib = wrapped ? [dev newLibraryWithData:wrapped error:nil] : nil;
+		id<MTLFunction> frag = [lib newFunctionWithName:@"clearFragment01"];
+		id<MTLBuffer> orange = [dev newBufferWithLength:256 options:0];
+		id<MTLBuffer> green = [dev newBufferWithLength:256 options:0];
+		float *fo = [orange contents], *fg = [green contents];
+
+		memset(fo, 0, 256);
+		memset(fg, 0, 256);
+		fo[0] = 1.0f; fo[1] = 128 / 255.0f; fo[2] = 0; fo[3] = 1;
+		fg[0] = 0; fg[1] = 1.0f; fg[2] = 0; fg[3] = 1;
+		id<MTLRenderPipelineState> pipe1 = nil, pipe4 = nil;
+		for (int samples = 1; samples <= 4 && frag != nil; samples += 3) {
+			MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+			NSError *perr = nil;
+
+			[pd setFragmentFunction:frag];
+			[[[pd colorAttachments] objectAtIndexedSubscript:0]
+			    setPixelFormat:MTLPixelFormatBGRA8Unorm];
+			[pd setRasterSampleCount:samples];
+			id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd
+											    error:&perr];
+			[pd release];
+			printf("drvtest: blit: pipeline of %d sample%s: %s%s\n", samples,
+			       samples == 1 ? "" : "s", ps ? "made" : "NOT MADE",
+			       perr ? [[perr localizedDescription] UTF8String] : "");
+			if (samples == 1) pipe1 = ps; else pipe4 = ps;
+		}
+		MTLTextureDescriptor *cd = [MTLTextureDescriptor
+		    texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:64 height:64
+					     mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		id<MTLTexture> target = [dev newTextureWithDescriptor:cd];
+		id<MTLTexture> resolved = [dev newTextureWithDescriptor:cd];
+		cd.textureType = MTLTextureType2DMultisample;
+		cd.sampleCount = 4;
+		cd.storageMode = MTLStorageModePrivate;
+		id<MTLTexture> ms = [dev newTextureWithDescriptor:cd];
+		printf("drvtest: blit: a 4-sample BGRA8 texture: %s\n", ms ? "made" : "NOT MADE");
+
+		/* count texels of each BGRA colour in a 64x64 readback */
+#define PASS_COUNT(tex, b_, g_, r_) ({ \
+		memset(pb, 0, 64 * 64 * 4); \
+		NSError *e_ = BLIT_RUN([enc copyFromTexture:(tex) sourceSlice:0 sourceLevel:0 \
+		    sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(64, 64, 1) toBuffer:b \
+		    destinationOffset:0 destinationBytesPerRow:0 destinationBytesPerImage:0]); \
+		unsigned n_ = 0; \
+		for (unsigned i_ = 0; e_ == nil && i_ < 64 * 64; i_++) \
+			n_ += pb[4 * i_] == (b_) && pb[4 * i_ + 1] == (g_) && pb[4 * i_ + 2] == (r_); \
+		n_; })
+#define PASS(tex, clear, resolve, drawing) ({ \
+		id<MTLCommandBuffer> cb = [queue commandBuffer]; \
+		MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor]; \
+		MTLRenderPassColorAttachmentDescriptor *ca = [[rp colorAttachments] objectAtIndexedSubscript:0]; \
+		ca.texture = (tex); ca.loadAction = MTLLoadActionClear; ca.clearColor = (clear); \
+		ca.storeAction = (resolve) ? MTLStoreActionMultisampleResolve : MTLStoreActionStore; \
+		ca.resolveTexture = (resolve); \
+		id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp]; \
+		drawing; \
+		[enc endEncoding]; [cb commit]; [cb waitUntilCompleted]; \
+		[cb status] == MTLCommandBufferStatusCompleted ? nil : [cb error]; })
+
+		err = PASS(target, MTLClearColorMake(0, 0, 1, 1), nil, (void)0);
+		unsigned blue = PASS_COUNT(target, 255, 0, 0);
+		BLIT_CHECK("a pass that clears and draws nothing", err == nil && blue == 4096, err);
+
+		if (pipe1 != nil) {
+			err = PASS(target, MTLClearColorMake(0, 0, 1, 1), nil, ({
+				[enc setRenderPipelineState:pipe1];
+				[enc setFragmentBuffer:orange offset:0 atIndex:14];
+				[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+				[enc setFragmentBuffer:green offset:0 atIndex:14];
+				[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:1 vertexCount:3];
+			}));
+			unsigned o = PASS_COUNT(target, 0, 128, 255), g = PASS_COUNT(target, 0, 255, 0);
+			blue = PASS_COUNT(target, 255, 0, 0);
+			printf("drvtest: blit: two draws: %u orange, %u green, %u blue of 4096\n", o, g, blue);
+			BLIT_CHECK("two draws in one cleared pass keep each other", err == nil && o > 1000 &&
+				   g > 1000 && o + g == 4096, err);
+		}
+		if (ms != nil) {
+			err = PASS(ms, MTLClearColorMake(1, 0, 0, 1), resolved, (void)0);
+			unsigned red = PASS_COUNT(resolved, 0, 0, 255);
+			printf("drvtest: blit: resolved after a clear: %u red; texel 0 reads %u %u %u %u, "
+			       "texel 2080 %u %u %u %u\n", red, pb[0], pb[1], pb[2], pb[3], pb[8320],
+			       pb[8321], pb[8322], pb[8323]);
+			BLIT_CHECK("4 samples cleared, resolved", err == nil && red == 4096, err);
+			if (pipe4 != nil) {
+				err = PASS(ms, MTLClearColorMake(0, 0, 1, 1), resolved, ({
+					[enc setRenderPipelineState:pipe4];
+					[enc setFragmentBuffer:green offset:0 atIndex:14];
+					[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+				}));
+				/* a strip of four: the whole quad, so every resolved texel is green */
+				unsigned g = PASS_COUNT(resolved, 0, 255, 0);
+				printf("drvtest: blit: 4-sample draw resolved: %u green of 4096\n", g);
+				BLIT_CHECK("4 samples drawn, resolved", err == nil && g == 4096, err);
+			}
+		}
+#undef PASS
+#undef PASS_COUNT
+	}
+
+	printf("drvtest: blit: %s\n", failed ? "FAILED" : "all ok");
+	return failed;
+#undef BLIT_RUN
+#undef BLIT_CHECK
 }
 
 /*
@@ -7328,6 +7562,10 @@ main(int argc, char **argv)
 		as_bundle = true;
 		next++;
 	}
+	if (argc > next && strcmp(argv[next], "--blit") == 0) {
+		blit_only = true;
+		next++;
+	}
 	if (argc > next && strcmp(argv[next], "--draw") == 0) {
 		draw = true;
 		next++;
@@ -7588,6 +7826,9 @@ have_device:
 		return 1;
 	}
 	printf("drvtest: it calls itself \"%s\"\n", [[sys name] UTF8String]);
+	if (blit_only) {
+		return blit_test(sys);
+	}
 
 	/* What the device still owes, counted by the runtime on the device rather than guessed
 	 * from the cache: every method the two protocols require, asked of the real object. An

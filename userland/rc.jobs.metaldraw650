@@ -1,0 +1,4 @@
+# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.metaldraw650).
+# Every fragment shader of AppleMetalGLRenderer's library drawn through the Metal driver in one boot:
+# with boot-arg log_launchd=0 the whole table fits in the loader's log (rc.jobs.metaldrawall draws 60).
+/redwood/bin/metal_drv_test --draw-all 0 300 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib

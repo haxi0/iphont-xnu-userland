@@ -198,6 +198,21 @@ flash_root(const char *dev)
 	    bind_dir(in_image("/xpc"), "/flash/System/Library/xpc"), "our launchd jobs, not iOS's");
 	check(bind_dir(in_image("/hal"), "/flash/System/Library/Audio/Plug-Ins/HAL"),
 	    "our audio device, not Apple's plug-ins");
+	if (lstat(in_image("/ext/RedwoodMetal.bundle"), &fw_st) == 0) {   /* a link into /redwood: not followed yet */
+		/*
+		 * Our Metal plug-in where Metal's discovery opens one, "/System/Library/Extensions/" +
+		 * MetalPluginName + ".bundle" (src/redwoodmetal.m), as the system image links it in a RAM
+		 * boot: a union mount, so the volume's own bundles -- AppleMetalGLRenderer's library
+		 * among them -- stay where they are under it.
+		 */
+		ok = mount("bindfs", "/flash/System/Library/Extensions", MNT_RDONLY | MNT_UNION,
+		    (void *)in_image("/ext")) == 0;
+		if (!ok) {
+			printf("  bindfs %s on /flash/System/Library/Extensions, union: %s\n", in_image("/ext"),
+			    strerror(errno));
+		}
+		check(ok, "our Metal plug-in among the volume's extensions");
+	}
 	if (stat("/fw", &fw_st) == 0) {
 		/* the audio DSP's firmware and the speakers' configuration, from the RAM image as in a RAM boot */
 		check(synthetic_dir("/flash/fw") && bind_dir("/fw", "/flash/fw"), "the firmware on /fw (adsp=1, sound=N)");

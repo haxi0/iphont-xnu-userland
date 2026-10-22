@@ -6215,6 +6215,153 @@ run_blend(const char *path, const char *func)
    return (wrong || refused_wrong || thin || !served) ? 1 : 0;
 }
 
+/*
+ * --blit: the six blit calls of air_metal.h, each checked against bytes computed here.
+ * RGBA8Unorm (70) so a texel is four bytes and every value survives exactly.
+ */
+static int
+run_blit(void)
+{
+   char why[512];
+   int failed = 0;
+   struct rwa_device *device = rwa_device_open(why, sizeof(why));
+#define BLIT_CHECK(what, ok) do { \
+      printf("air_metal_test: blit: %-44s %s\n", what, (ok) ? "ok" : "WRONG"); \
+      failed |= !(ok); \
+   } while (0)
+
+   if (!device) {
+      printf("air_metal_test: rwa_device_open: %s\n", why);
+      return 1;
+   }
+   struct rwa_buffer *a = rwa_buffer_create(device, 4096, why, sizeof(why));
+   struct rwa_buffer *b = rwa_buffer_create(device, 4096, why, sizeof(why));
+   if (!a || !b) {
+      printf("air_metal_test: rwa_buffer_create: %s\n", why);
+      return 1;
+   }
+   uint8_t *pa = rwa_buffer_map(a), *pb = rwa_buffer_map(b);
+   for (unsigned i = 0; i < 4096; i++) {
+      pa[i] = (uint8_t)(i * 7 + 13);
+      pb[i] = 0;
+   }
+
+   /* buffer to buffer, at offsets, on the GPU */
+   if (rwa_copy_buffer(a, 100, b, 300, 1000, why, sizeof(why)) || rwa_finish(device, why, sizeof(why)))
+      printf("air_metal_test: blit: copy_buffer: %s\n", why);
+   bool ok = pb[299] == 0 && pb[1300] == 0;
+   for (unsigned i = 0; i < 1000; i++)
+      ok &= pb[300 + i] == (uint8_t)((100 + i) * 7 + 13);
+   BLIT_CHECK("copy_buffer 1000 bytes from 100 to 300", ok);
+
+   /* fill */
+   if (rwa_fill_buffer(b, 64, 128, 0xa5, why, sizeof(why)) || rwa_finish(device, why, sizeof(why)))
+      printf("air_metal_test: blit: fill_buffer: %s\n", why);
+   ok = pb[63] == 0 && pb[192] == 0;
+   for (unsigned i = 64; i < 192; i++)
+      ok &= pb[i] == 0xa5;
+   BLIT_CHECK("fill_buffer 128 bytes of 0xa5 at 64", ok);
+
+   /* buffer -> texture -> buffer, a 16x8 region of a 32x32 level with a padded row */
+   const struct rwa_texture_shape ts = {
+      .pixel_format = 70, .type = MTL_TEXTURE_TYPE_2D, .width = 32, .height = 32, .depth = 1,
+      .array_length = 1, .mip_levels = 6, .sample_count = 1, .usage = MTL_USAGE_SHADER_READ | 4,
+   };
+   struct rwa_texture *t = rwa_texture_create(device, &ts, why, sizeof(why));
+   struct rwa_texture *u = rwa_texture_create(device, &ts, why, sizeof(why));
+   if (!t || !u) {
+      printf("air_metal_test: rwa_texture_create: %s\n", why);
+      return 1;
+   }
+   const unsigned size[3] = { 16, 8, 1 }, at[3] = { 4, 2, 0 }, zero[3] = { 0, 0, 0 };
+   memset(pb, 0, 4096);
+   if (rwa_copy_buffer_to_texture(a, 8, 80, 0, size, t, 0, 0, at, why, sizeof(why)) ||
+       rwa_copy_texture_to_buffer(t, 0, 0, at, size, b, 0, 64, 0, why, sizeof(why)) ||
+       rwa_finish(device, why, sizeof(why)))
+      printf("air_metal_test: blit: buffer<->texture: %s\n", why);
+   ok = true;
+   for (unsigned y = 0; y < 8; y++)
+      for (unsigned x = 0; x < 64; x++)
+         ok &= pb[y * 64 + x] == pa[8 + y * 80 + x];
+   BLIT_CHECK("buffer -> texture -> buffer, 16x8 RGBA8, rows 80/64", ok);
+
+   /* texture -> texture, then read back through the buffer path */
+   memset(pb, 0, 4096);
+   if (rwa_copy_texture(t, 0, 0, at, size, u, 0, 0, zero, why, sizeof(why)) ||
+       rwa_copy_texture_to_buffer(u, 0, 0, zero, size, b, 0, 0, 0, why, sizeof(why)) ||
+       rwa_finish(device, why, sizeof(why)))
+      printf("air_metal_test: blit: copy_texture: %s\n", why);
+   ok = true;
+   for (unsigned y = 0; y < 8; y++)
+      for (unsigned x = 0; x < 64; x++)
+         ok &= pb[y * 64 + x] == pa[8 + y * 80 + x];
+   BLIT_CHECK("copy_texture 16x8 from (4,2) to (0,0)", ok);
+
+   /* mipmaps of a uniform level 0 are uniform, so every level reads the same texel */
+   uint8_t *solid = malloc(32 * 32 * 4);
+   for (unsigned i = 0; i < 32 * 32; i++)
+      memcpy(solid + 4 * i, (uint8_t[]){ 200, 100, 50, 255 }, 4);
+   const unsigned all[3] = { 32, 32, 1 };
+   memcpy(pa, solid, 32 * 32 * 4);
+   memset(pb, 0, 4096);
+   const unsigned one[3] = { 1, 1, 1 };
+   if (rwa_copy_buffer_to_texture(a, 0, 0, 0, all, u, 0, 0, zero, why, sizeof(why)) ||
+       rwa_generate_mipmaps(u, why, sizeof(why)) ||
+       rwa_copy_texture_to_buffer(u, 0, 5, zero, one, b, 0, 0, 0, why, sizeof(why)) ||
+       rwa_finish(device, why, sizeof(why)))
+      printf("air_metal_test: blit: mipmaps: %s\n", why);
+   ok = pb[0] == 200 && pb[1] == 100 && pb[2] == 50 && pb[3] == 255;
+   printf("air_metal_test: blit: level 5 reads %u %u %u %u\n", pb[0], pb[1], pb[2], pb[3]);
+   BLIT_CHECK("generate_mipmaps: level 5 of a uniform 32x32", ok);
+   free(solid);
+
+   /* clear a 4-sample texture, resolve it into u (one sample), read u back */
+   const struct rwa_texture_shape ms_shape = {
+      .pixel_format = 70, .type = MTL_TEXTURE_TYPE_2D_MULTISAMPLE, .width = 32, .height = 32,
+      .depth = 1, .array_length = 1, .mip_levels = 1, .sample_count = 4,
+      .usage = MTL_USAGE_SHADER_READ | 4,
+   };
+   struct rwa_texture *ms = rwa_texture_create(device, &ms_shape, why, sizeof(why));
+   const double rgba[4] = { 0.0, 1.0, 0.0, 1.0 };
+   if (!ms) {
+      printf("air_metal_test: blit: clear+resolve not tested here: %s\n", why);
+      goto no_multisample;
+   }
+   if (rwa_clear_color(ms, rgba, why, sizeof(why)) ||
+       rwa_resolve_texture(ms, u, why, sizeof(why)) ||
+       rwa_copy_texture_to_buffer(u, 0, 0, zero, one, b, 0, 0, 0, why, sizeof(why)) ||
+       rwa_finish(device, why, sizeof(why)))
+      printf("air_metal_test: blit: clear+resolve: %s\n", why);
+   printf("air_metal_test: blit: resolved texel reads %u %u %u %u\n", pb[0], pb[1], pb[2], pb[3]);
+   BLIT_CHECK("clear a 4-sample texture, resolve, read", pb[0] == 0 && pb[1] == 255 &&
+              pb[2] == 0 && pb[3] == 255);
+   rwa_texture_destroy(ms);
+no_multisample:;
+
+   /* clear the depth of a Depth32Float texture to 0.25 and read it */
+   const struct rwa_texture_shape z_shape = {
+      .pixel_format = 252, .type = MTL_TEXTURE_TYPE_2D, .width = 8, .height = 8, .depth = 1,
+      .array_length = 1, .mip_levels = 1, .sample_count = 1, .usage = MTL_USAGE_SHADER_READ | 4,
+   };
+   struct rwa_texture *z = rwa_texture_create(device, &z_shape, why, sizeof(why));
+   float depth = 0.25f, got = -1;
+   if (!z || rwa_clear_depth_stencil(z, &depth, NULL, why, sizeof(why)) ||
+       rwa_finish(device, why, sizeof(why)) ||
+       rwa_depth_read(z, 0, 0, zero, one, &got, NULL, why, sizeof(why)))
+      printf("air_metal_test: blit: depth clear: %s\n", why);
+   BLIT_CHECK("clear Depth32Float to 0.25", got == 0.25f);
+   rwa_texture_destroy(z);
+
+   rwa_texture_destroy(t);
+   rwa_texture_destroy(u);
+   rwa_buffer_destroy(a);
+   rwa_buffer_destroy(b);
+   rwa_device_close(device);
+   printf("air_metal_test: blit: %s\n", failed ? "FAILED" : "all ok");
+   return failed;
+#undef BLIT_CHECK
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6228,6 +6375,8 @@ main(int argc, char **argv)
     * first: it is the answer a caller needs BEFORE it can make the textures the two
     * modes below make.
     */
+   if (argc >= 2 && !strcmp(argv[1], "--blit"))
+      return run_blit();
    if (argc >= 2 && !strcmp(argv[1], "--textures")) {
       if (argc < 3) {
          fprintf(stderr, "usage: air_metal_test --textures FILE.metallib [FUNCTION]\n");

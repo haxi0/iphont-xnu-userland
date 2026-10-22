@@ -51,6 +51,7 @@ if [ ! -d "$SRC" ] || [ "$(cat "$SRC/.air-patches" 2>/dev/null)" != "$PATCHES" ]
 	done
 
 	# glibc 2.43 and later declare C11's once_flag and call_once in <stdlib.h>,
+	# (and only those: glibc 2.42 under _GNU_SOURCE has neither there, so the version is checked)
 	# which clashes with Mesa 25.0's own definitions in src/c11/threads.h. Only
 	# this host build hits it; the iOS cross build has its own libc.
 	python3 - "$SRC" <<-'PY'
@@ -59,8 +60,9 @@ if [ ! -d "$SRC" ] || [ "$(cat "$SRC/.air-patches" 2>/dev/null)" != "$PATCHES" ]
 		p = root + '/src/c11/threads.h'
 		s = open(p).read()
 		old = "typedef pthread_once_t  once_flag;\n#  define ONCE_FLAG_INIT PTHREAD_ONCE_INIT\n"
-		new = ("#  if defined(__GLIBC__) && __GLIBC_USE(ISOC23) && !defined(__cplusplus)\n"
+		new = ("#  if defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 43) && __GLIBC_USE(ISOC23) && !defined(__cplusplus)\n"
 		       "#    define C11_LIBC_HAS_CALL_ONCE 1\n"
+		       "#    include <stdlib.h>\n"
 		       "#  else\n"
 		       "typedef pthread_once_t  once_flag;\n"
 		       "#    define ONCE_FLAG_INIT PTHREAD_ONCE_INIT\n"

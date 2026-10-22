@@ -564,10 +564,11 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
-# (bsd/dev/redwood_haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
-if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
+# (bsd/dev/redwood_haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either). The OnePlus 8's
+# are aw8697_haptic_166.bin .. _174.bin, one per motor f0: all of them that are there.
+if ls ../fw-haptic/aw8697_haptic*.bin >/dev/null 2>&1; then
 	mkdir -p root/fw
-	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
+	install -m 0644 ../fw-haptic/aw8697_haptic*.bin root/fw/
 fi
 # ... and the cameras' register tables (bsd/dev/redwood_camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
@@ -625,6 +626,9 @@ for f in extensions.plist extensions.plist.sig; do
 	[ -f $IOS/rootfs/System/Library/xpc/$f ] && cp $IOS/rootfs/System/Library/xpc/$f root/xpc/
 done
 [ -d root/lib/RedwoodAudio.driver ] && ln -s /redwood/lib/RedwoodAudio.driver root/hal/RedwoodAudio.driver
+# ... and our Metal plug-in, for the union over the volume's /System/Library/Extensions (src/init.c)
+mkdir -p root/ext
+[ -d root/lib/RedwoodMetal.bundle ] && ln -sfn /redwood/lib/RedwoodMetal.bundle root/ext/RedwoodMetal.bundle
 # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
 # as it is, which the kernel's drivers use where it lies in memory (bsd/dev/redwood_image.c)
 python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1

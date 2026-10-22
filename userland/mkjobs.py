@@ -322,9 +322,10 @@ if rest:
         # it. The boot of 22 October showed what declining costs: SpringBoard's icons stopped being
         # drawn, because its layers ask for one of those formats and a refused texture is a layer
         # that never appears.
-        for name in ('RWA_PACKED16',):
-            if os.environ.get(name):
-                job.setdefault('EnvironmentVariables', {})[name] = os.environ[name]
+        # (not `name': that is the job's file name, written below)
+        for variable in ('RWA_PACKED16',):
+            if os.environ.get(variable):
+                job.setdefault('EnvironmentVariables', {})[variable] = os.environ[variable]
         if label in oslog:
             job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
         with open(f'{dest}/{name}', 'wb') as f:
