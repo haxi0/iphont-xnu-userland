@@ -1,4 +1,4 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.metaldrawall).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.metaldrawall).
 #
 # Every fragment shader of AppleMetalGLRenderer's library, drawn through the Metal driver,
 # one line each. One shader drawn is an example; air_run has drawn all of them on softpipe and
@@ -9,4 +9,4 @@
 # One process for the whole library on purpose: the loader keeps the first 256 KB and the last
 # 1 MB of a boot's log and drops the middle, so 271 processes would lose the middle of their own
 # table.
-/redwood/bin/metal_drv_test --draw-all /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --draw-all /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib

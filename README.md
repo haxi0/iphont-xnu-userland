@@ -26,7 +26,7 @@ common/ugit status     # git for this repository inside that tree
 | `userland/build.sh` | builds the APFS images: `root.apfs` (our init, libraries, launchd jobs, firmware) and `system.apfs` (the selected part of iOS 16.5 and its cryptexes); every option is documented at the top |
 | `userland/src/` | `init.c` (process 1), injected libraries (`inject.c` backboardd, `inject_sb.c` SpringBoard, `inject_media.c` mediaserverd, `inject_tweaks.c`), the CoreAudio output device (`audio_plugin.c`), the OpenGL ES bridge to Mesa (`eagl.c`), Metal driver work, tests |
 | `userland/libmini/` | a tiny libc for the static programs |
-| `userland/rc.*`, `com.redwood.*.plist` | job lists and launchd jobs for test scenarios (`RC_JOBS=rc.jobs.tour`, `rc.jobs.ssh`, ...) |
+| `userland/rc.*`, `com.hackios.*.plist` | job lists and launchd jobs for test scenarios (`RC_JOBS=rc.jobs.tour`, `rc.jobs.ssh`, ...) |
 | `userland/mkjobs.py`, `jobinfo.py` | the stock iOS launchd jobs: which are loaded, who provides a Mach service |
 | `userland/var/` | our default preferences for `/private/var` |
 | `ios165/` | `fetch.sh` / `fetch-from-ipsw.py` (take iOS out of the IPSW), `select-system.py` (what goes into the image) |

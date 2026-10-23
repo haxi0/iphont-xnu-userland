@@ -3,20 +3,16 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.redwood.demo</string>
+	<string>com.hackios.thermald</string>
+	<!-- passes the kernel's thermal pressure level (kern.hackios.thermal_pressure) to iOS as the state of
+	     com.apple.system.thermalpressurelevel, so apps see ProcessInfo.thermalState change
+	     (src/thermald.c); without the kernel's thermal service it ends at once -->
 	<key>ProgramArguments</key>
 	<array>
-		<string>/redwood/sbin/init</string>
-		<string>/redwood/etc/rc.jobs</string>
+		<string>/hackios/bin/thermald</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
-	<key>AbandonProcessGroup</key>
-	<true/>
-	<!-- not a background job: those get their timers rounded up by a tenth of a second,
-	     and the touch gestures replayed from here are a matter of milliseconds -->
-	<key>ProcessType</key>
-	<string>Interactive</string>
 	<key>StandardOutPath</key>
 	<string>/dev/console</string>
 	<key>StandardErrorPath</key>

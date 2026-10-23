@@ -1,4 +1,4 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.metalpicture).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.metalpicture).
 #
 # A picture of the whole panel, every pixel of which this port's Metal driver computed on
 # the Adreno (docs/metal.md 10.33). Everything the driver has drawn until now went into a
@@ -29,10 +29,10 @@
 # this driver would have hung anything that drew for two seconds. The mosaic makes exactly
 # 64 and the ladder's first rung asks for the 65th, which is why this file is now the test
 # that catches it: logs/114823-run.log, where rung one blocked in
-# -[RedwoodMetalCommandQueue commandBuffer] and a heartbeat thread proved the process alive
+# -[HKMetalCommandQueue commandBuffer] and a heartbeat thread proved the process alive
 # and blocked for four minutes rather than killed.
 #
-# The fix is in userland/src/redwoodmetal.m: the slot goes back at -commit (where this
+# The fix is in userland/src/hkmetal.m: the slot goes back at -commit (where this
 # driver's work is actually finished) and at -dealloc for a buffer that was never
 # committed, and Apple's own flag is cleared with it. The queue now also reports its
 # maxCommandBufferCount and how many buffers still hold a slot, so this boot prints the
@@ -74,14 +74,14 @@
 # state is not reaching the hardware and nothing else in the lower two thirds means much.
 #
 # And what the presentation is, said plainly: the pixels go to the panel through
-# kRedwoodShow (iokit/Kernel/RedwoodGPU.cpp), which is a row-by-row copy in the kernel and
+# kHKShow (iokit/Kernel/HKGPU.cpp), which is a row-by-row copy in the kernel and
 # is the same selector src/gl_test.c puts its triangle on the screen with. That copy is NOT
 # Metal's, and this file does not claim it is. What is claimed is that all 2 592 000 pixels
 # handed to it were computed by Metal pipelines of this driver on the Adreno: no border, no
 # label, no background is drawn by the processor, which is why the three bands add up to
 # the panel exactly (1104 + 648 + 648 = 2400).
 #
-# Needs gpu=1 and an image built with GL=1, for /redwood/lib/libredwoodair.dylib. Without
+# Needs gpu=1 and an image built with GL=1, for /hackios/lib/libhackiosair.dylib. Without
 # either, the first line below says so and the second repeats it, and nothing is drawn.
 #
 # BUILD IT WITH JOBS="" as well, which is how logs/101536-run.log was taken: launchd then
@@ -97,14 +97,14 @@
 #    must read 100+x, 200+y, 300+x+y, 400 and not sixteen copies of 100 203 303 400. It is
 #    first because it is cheap and because a picture that comes out wrong under a driver
 #    that cannot draw 4x4 would be two findings tangled into one.
-/redwood/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
 #
 # 2. A pause, which is a sleep and nothing else (src/rwtouch.c: "wait SECONDS"). Under
 #    JOBS="" there is no lock screen to wait for and these twenty seconds buy nothing but
 #    a quiet console; they are kept because the same file has to work on an image built
 #    with the window server, where src/gl_test.c's job waits exactly this way
 #    (rc.jobs.gltest) for the lock screen to stop drawing over the panel.
-/redwood/bin/rwtouch wait 20
+/hackios/bin/rwtouch wait 20
 #
 # 3. The picture itself. TAKE THE SCREENSHOT AS SOON AS ANYTHING APPEARS ON THE PHONE:
 #    from another terminal, `./xl screenshot logs/metal-picture.png`. The mosaic alone is
@@ -222,4 +222,4 @@
 #    (Nothing here stores to [[depth]]. Apple's texturedFragment2DDepth and
 #    texturedFragment3DDepth hang this GPU outright -- logs/094810-run.log, status 5 and
 #    then a canary that does not finish either -- so they are off the table for a picture.)
-/redwood/bin/metal_drv_test --picture 180 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --picture 180 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib

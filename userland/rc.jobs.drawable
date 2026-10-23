@@ -1,8 +1,8 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.drawable).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.drawable).
 #
 # WHAT THIS BOOT IS FOR. The port has no drawable, and that is the single most expensive
 # thing about it: showing one finished frame costs 15.46 ms -- -getBytes: 11.96 ms to pull a
-# finished attachment into the process and kRedwoodShow 3.50 ms to push it into the kernel --
+# finished attachment into the process and kHKShow 3.50 ms to push it into the kernel --
 # which caps everything at 64.7 frames a second with nothing drawn (docs/metal.md 10.43).
 # A drawable removes both copies, because the pass writes into memory the display controller
 # already scans out.
@@ -10,7 +10,7 @@
 # -[CAMetalLayer nextDrawable] asks a Metal device exactly one thing for this:
 # -newTextureWithDescriptor:iosurface:plane:, a texture over an IOSurface CoreAnimation
 # allocated (docs/metal.md 10.46). The library grew rwa_texture_from_surface for it and
-# userland/src/redwooddrawable.m is the bridge. NOTHING OF EITHER HAS EVER RUN ON THE PHONE.
+# userland/src/hkdrawable.m is the bridge. NOTHING OF EITHER HAS EVER RUN ON THE PHONE.
 # This list is the first time, and it asks the one question that separates a texture over the
 # surface's own pages from a texture over a copy of them.
 #
@@ -36,12 +36,12 @@
 #   gpu=1              in XL_CMDLINE. Without it there is no Adreno to import into, and the
 #                      library says so by name; the test then prints NOT MEASURED and stops,
 #                      which is not a failure and must not be read as one.
-#   an image with GL=1 for /redwood/lib/libredwoodair.dylib, and it must be a library built
+#   an image with GL=1 for /hackios/lib/libhackiosair.dylib, and it must be a library built
 #                      AFTER rwa_texture_from_surface existed. An older one is the refusal
 #                      "the compiler library in this image has no rwa_texture_from_surface",
 #                      and that sentence means the image is stale, not that the path is wrong.
 #                      Check it on the machine before booting:
-#                        nm -gU xnu-deps/build/mesa/out/libredwoodair.dylib | grep from_surface
+#                        nm -gU xnu-deps/build/mesa/out/libhackiosair.dylib | grep from_surface
 #   JOBS=""            not required -- this test shares nothing with the window server -- but
 #                      kept for the first boot so that nothing else is allocating surfaces or
 #                      GPU buffers while the kernel's table is being read.
@@ -80,14 +80,14 @@
 #    WRONG: any of them silent, or 4352 refused. 4352 refused means the agreement between
 #    MINISURF_ROW_ALIGN (64) and a6xx's pitchalign (also 64) has broken on one side, and then
 #    no drawable can exist until it is found.
-/redwood/bin/drawable_test --refusals
+/hackios/bin/drawable_test --refusals
 #
 # 2. THE IMPORT, over a real IOSurface the size of the panel. In order, the log must hold:
 #
 #    (a) the surface as IOSurface.framework sees it: ID, width, height, bytes a row, alloc
 #        size, base address. For 1080x2400 BGRA with no bytes-per-row asked for, the row must
 #        be 4352 -- the kernel aligns it to 64 itself (MINISURF_ROW_ALIGN).
-#    (b) the same surface as the KERNEL describes it through kRedwoodSurface (0x7e), printed
+#    (b) the same surface as the KERNEL describes it through kHKSurface (0x7e), printed
 #        separately on purpose: the two answers come from opposite sides of one call, and
 #        either is only worth quoting because the other agrees. The FourCC must read 'BGRA'.
 #    (c) the GPU's name, which is the proof the library opened freedreno and not softpipe. If
@@ -108,7 +108,7 @@
 #        is invisible to any test that reads back through the same path it wrote.
 #      - a texel comes back as another texel's value: the two sides disagree about the stride.
 #        The value says which texel it belongs to, so the arithmetic is in the log already.
-/redwood/bin/drawable_test 1080 2400
+/hackios/bin/drawable_test 1080 2400
 #
 # 3. THE SAME, SMALL, as a second sample from a second process. 64x64 is one page's worth of
 #    rows and a stride of 256 -- already aligned, so it tests the import and not the
@@ -116,7 +116,7 @@
 #    makes one GPU buffer per user client for a surface, so a second process is a second
 #    buffer over the same kind of memory, and a result that holds for only one of them would
 #    be about the client and not about the surface.
-/redwood/bin/drawable_test 64 64
+/hackios/bin/drawable_test 64 64
 #
 # HOW TO READ THE LOG AFTERWARDS (grep -a: the log has NUL bytes in it)
 #
@@ -134,10 +134,10 @@
 #       the geometry both sides agreed on, which is the number to quote in any write-up.
 #   grep -a 'drawable_test: the GPU is' logs/*-run.log
 #       must say an Adreno. "softpipe" here invalidates lines (d) to (f).
-#   grep -a 'redwooddrawable:' logs/*-run.log
+#   grep -a 'hkdrawable:' logs/*-run.log
 #       the bridge's own one-off lines: whether the compiler library is loaded and whether it
 #       has rwa_texture_from_surface, and whether this process had IOSurfaceGetID.
-#   grep -a 'RedwoodGPU: request' logs/*-run.log
+#   grep -a 'HKGPU: request' logs/*-run.log
 #       empty. A line here means the kernel was asked something it does not know, and 0x7e is
 #       the request this list depends on.
 #   grep -a 'MiniIOSurface' logs/*-run.log

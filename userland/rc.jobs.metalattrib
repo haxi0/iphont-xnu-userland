@@ -1,4 +1,4 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.metalattrib).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.metalattrib).
 #
 # WHAT THIS BOOT IS FOR. docs/metal.md 10.44 put MTLVertexDescriptor into the contract and
 # measured it on the host: the offsets, the stride, the formats, the buffer index, the step
@@ -38,8 +38,8 @@
 # WHAT IT NEEDS, AND THE ONE THING THE LAST BOOT GOT WRONG
 #
 # THE LIBRARY AND THE DRIVER MUST COME FROM ONE SNAPSHOT, and in logs/235006-run.log they did
-# not. That boot carried a fresh driver and a libredwoodair.dylib built an hour earlier
-# (xnu-deps/build/mesa/out/libredwoodair.dylib, 22:42, from a 204 161-byte air_metal.c against
+# not. That boot carried a fresh driver and a libhackiosair.dylib built an hour earlier
+# (xnu-deps/build/mesa/out/libhackiosair.dylib, 22:42, from a 204 161-byte air_metal.c against
 # this work's 234 981), so the two --vertex lines of rc.jobs.metalvertexdesc printed the OLD
 # refusal -- "carries no vertex attribute layout", a sentence that does not exist in the new
 # library -- which is exactly the tripwire that list wrote down. Nothing in that log is about
@@ -49,7 +49,7 @@
 #
 #   the library        AIR=1 tools/mk-mesa.sh, run FROM THIS WORKING COPY (it resolves its
 #                      sources from its own path, and 21 working copies hold 21 different
-#                      air_metal.c). It must print a libredwoodair.dylib line, and
+#                      air_metal.c). It must print a libhackiosair.dylib line, and
 #                      xnu-deps/build/mesa/mesa-25.0.7/src/compiler/air/air_metal.c must then
 #                      be the same size as tools/mesa/air/air_metal.c.
 #   the image          CRYPTEXES=flash SYSTEM=1 GL=1 QUIET=1 JOBS="" \
@@ -68,12 +68,12 @@
 #
 #   grep -a -c "carries no vertex attribute layout"
 #     must be 0        the sentence is not in the new library. Anything else means the image
-#                      still carries an older libredwoodair.dylib than the driver, and
+#                      still carries an older libhackiosair.dylib than the driver, and
 #                      nothing below is about this work -- exactly as in logs/235006-run.log.
 #
 #   grep -a "vertex descriptor configures"
 #     expected 10      one line per pipeline this mode builds with a descriptor that configures
-#                      something: "redwoodmetal: this pipeline's vertex descriptor configures 3
+#                      something: "hkmetal: this pipeline's vertex descriptor configures 3
 #                      attributes, the highest from buffer index 5" (and 2 for the gated step,
 #                      which leaves three attributes alone). This is the first line in any log
 #                      of this port that says a vertex layout arrived at all.
@@ -146,13 +146,13 @@
 #    and its own single vertex element: the road 255 pixel-compared draws went down. If it has
 #    changed, the layout work broke the path it was meant to leave alone, and nothing below is
 #    worth reading.
-/redwood/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
 #
 # 2. THE MEASUREMENT. One line, because init splits on blanks and quotes nothing: the vertex
 #    library and the gated module are QuartzCore's, the fragment library is the positional
 #    argument, and the fragment function is named so that the default (clearFragment20, which
 #    writes a constant and would make every picture here identical) cannot be used by accident.
-/redwood/bin/metal_drv_test --draw-attrib --vertexlib /System/Library/Frameworks/QuartzCore.framework/default.metallib --vertex std_vert0_lpf --gated fixed_vert_lpf_spc --fragment texturedFragment2DUInt /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --draw-attrib --vertexlib /System/Library/Frameworks/QuartzCore.framework/default.metallib --vertex std_vert0_lpf --gated fixed_vert_lpf_spc --fragment texturedFragment2DUInt /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
 #
 # 3. And the same over the HALF-PRECISION variants of the same two modules, which is the family
 #    the window server itself asked for (its one refused spec named downsample_blur_vert_lph).
@@ -175,4 +175,4 @@
 #    if its words differ from line 2's while line 2's are right, that is the varying's width
 #    and not the fetch, and the thing to do with it is a measurement of its own rather than a
 #    conclusion about the descriptor.
-/redwood/bin/metal_drv_test --draw-attrib --vertexlib /System/Library/Frameworks/QuartzCore.framework/default.metallib --vertex std_vert0_lph --gated fixed_vert_lph_spc --fragment texturedFragment2DUInt /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --draw-attrib --vertexlib /System/Library/Frameworks/QuartzCore.framework/default.metallib --vertex std_vert0_lph --gated fixed_vert_lph_spc --fragment texturedFragment2DUInt /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib

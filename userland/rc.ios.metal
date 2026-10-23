@@ -11,10 +11,10 @@
 #
 # And one thing about that kernel, for whoever boots it next and not for this run: a kernel
 # built in a working copy where tools/mk-ath11k.sh has not run has no Wi-Fi driver in it (weak
-# stubs, bsd/dev/redwood_lx.c: "lx: THE DRIVER IS NOT BUILT IN"), which costs this experiment
+# stubs, bsd/dev/hk_lx.c: "lx: THE DRIVER IS NOT BUILT IN"), which costs this experiment
 # nothing and costs a boot with wifi=1 everything.
-/redwood/bin/metal_props show
-/redwood/bin/metal_props on
+/hackios/bin/metal_props show
+/hackios/bin/metal_props on
 # the registry's own answer, from a program of Apple's that knows nothing about any of this
 /usr/sbin/ioreg -l -c IOAcceleratorES
 # and off again: the way out without a reboot, measured in the same run
@@ -29,5 +29,5 @@
 # It is run here, under RC=rc.ios.metal, for the reason 10.14 gives: launchd is never born,
 # so no daemon can ask Metal and meet a half-made device. The properties are removed again
 # on the line after it, so nothing outlives this list.
-/redwood/bin/metal_test
-/redwood/bin/metal_props off
+/hackios/bin/metal_test
+/hackios/bin/metal_props off

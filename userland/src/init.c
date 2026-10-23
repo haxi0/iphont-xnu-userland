@@ -1,7 +1,7 @@
 /*
  * Process 1 of the Darwin bring-up, until it hands over to the real launchd.
  *
- * It lives in the small image mounted on /redwood (see stage0.c) and
+ * It lives in the small image mounted on /hackios (see stage0.c) and
  *   - mounts a memory filesystem on /private/var and creates the directories
  *     a system expects there;
  *   - checks what the kernel can do for user space, one line per check;
@@ -10,7 +10,7 @@
  *   - halts the machine if it is still process 1 after that.
  *
  * Started with a file name by anything else, it is a command runner: that is
- * how a launchd job (LaunchDaemons/com.redwood.demo.plist) runs a list of
+ * how a launchd job (LaunchDaemons/com.hackios.demo.plist) runs a list of
  * commands.
  */
 #include "mini.h"
@@ -128,11 +128,11 @@ synthetic_dir(const char *path)
  *     entry of the volume -- not a mount, which whatever registers the system's
  *     applications passed over), made before /private/var is covered by a memory
  *     filesystem.
- * Then the volume becomes the root (sysctl kern.redwood_switch_root) and the boot volume
+ * Then the volume becomes the root (sysctl kern.hk_switch_root) and the boot volume
  * goes to its /private/preboot, the cryptexes onto that volume's Cryptexes/OS and App: the iOS
  * volume's /System/Cryptexes/OS and App point to /private/preboot/Cryptexes/OS and App, and the
  * kernel takes a shared cache from the first.  This
- * image goes along with it, to /private/preboot/redwood, and is bound back on /redwood, a
+ * image goes along with it, to /private/preboot/redwood, and is bound back on /hackios, a
  * synthetic directory of the volume.  The boot-args stay those of a RAM disk (rd=md0),
  * which is what launchd reads to leave out the boot tasks of a real device.
  */
@@ -191,17 +191,17 @@ flash_root(const char *dev)
 	if (!ok) {
 		return;
 	}
-	check(synthetic_dir("/flash/redwood"), "a synthetic /redwood on it, for this image");
+	check(synthetic_dir("/flash/hackios"), "a synthetic /hackios on it, for this image");
 	check(bind_dir(in_image("/LaunchDaemons"), "/flash/System/Library/LaunchDaemons") &&
 	    bind_dir(in_image("/empty"), "/flash/System/Library/NanoLaunchDaemons") &&
 	    bind_dir(in_image("/empty"), "/flash/System/Library/LaunchAngels") &&
 	    bind_dir(in_image("/xpc"), "/flash/System/Library/xpc"), "our launchd jobs, not iOS's");
 	check(bind_dir(in_image("/hal"), "/flash/System/Library/Audio/Plug-Ins/HAL"),
 	    "our audio device, not Apple's plug-ins");
-	if (lstat(in_image("/ext/RedwoodMetal.bundle"), &fw_st) == 0) {   /* a link into /redwood: not followed yet */
+	if (lstat(in_image("/ext/HKMetal.bundle"), &fw_st) == 0) {   /* a link into /hackios: not followed yet */
 		/*
 		 * Our Metal plug-in where Metal's discovery opens one, "/System/Library/Extensions/" +
-		 * MetalPluginName + ".bundle" (src/redwoodmetal.m), as the system image links it in a RAM
+		 * MetalPluginName + ".bundle" (src/hkmetal.m), as the system image links it in a RAM
 		 * boot: a union mount, so the volume's own bundles -- AppleMetalGLRenderer's library
 		 * among them -- stay where they are under it.
 		 */
@@ -261,7 +261,7 @@ flash_root(const char *dev)
 	printf("  %d applications waiting to be installed, %d of them in /Applications\n", apps, bound);
 	check(apps > 0 && bound == apps, "the first boot's applications in /Applications");
 
-	ok = sysctlbyname("kern.redwood_switch_root", NULL, NULL, "/flash private/preboot", 22) == 0;
+	ok = sysctlbyname("kern.hk_switch_root", NULL, NULL, "/flash private/preboot", 22) == 0;
 	if (!ok) {
 		printf("  switching the root: %s\n", strerror(errno));
 	}
@@ -280,7 +280,7 @@ flash_root(const char *dev)
 	 */
 	mount_cryptex("OS", ",c=1", devpath);
 	mount_cryptex("App", ",c=2", devpath);
-	check(bind_dir("/private/preboot/redwood", "/redwood"), "this image back on /redwood");
+	check(bind_dir("/private/preboot/hackios", "/hackios"), "this image back on /hackios");
 	flash_root_mode = 1;
 }
 
@@ -1357,7 +1357,7 @@ test_time(void)
 
 /*
  * etc/inject.conf is one line, "LIBRARY NAME NAME ...": the kernel starts the programs with
- * these file names with the library inserted (sysctl kern.exec_inject, see libredwood).
+ * these file names with the library inserted (sysctl kern.exec_inject, see libhackios).
  */
 static void
 configure_inject(void)
@@ -1435,8 +1435,8 @@ main(int argc, char **argv, char **envp)
 	}
 
 	(void)envp;
-	if (argc > 0 && strncmp(argv[0], "/redwood/", 9) == 0) {
-		base = "/redwood";
+	if (argc > 0 && strncmp(argv[0], "/hackios/", 9) == 0) {
+		base = "/hackios";
 	}
 	/* Not process 1: a command runner, "init FILE" (this is how a launchd job runs a list of commands). */
 	if (getpid() != 1) {

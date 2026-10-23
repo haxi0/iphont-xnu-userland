@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-	What RedwoodTriangle.app is signed with, and why there is anything here at all.
+	What HKTriangle.app is signed with, and why there is anything here at all.
 
 	NOTHING IN THIS PORT NEEDS A SIGNATURE TO RUN. AMFI here is a stand-in that accepts every
 	signature and holds no trust cache (libkern/amfi/miniamfi.c), and the kernel is built
 	without config_enforce_signed_code, so an unsigned binary executes -- every program in
-	/redwood/bin is one. What a signature still buys is ENTITLEMENTS: they are read out of it
+	/hackios/bin is one. What a signature still buys is ENTITLEMENTS: they are read out of it
 	(libkern/amfi/miniamfi_entitlements.cpp) and nowhere else, so a process that wants one has
 	to be signed to hold it.
 
-	These three are insurance against the one thing an application has that a /redwood/bin
+	These three are insurance against the one thing an application has that a /hackios/bin
 	program does not: it is started FOR SpringBoard, by RunningBoard, and the daemons on that
 	path ask about a bundle's identity and its container. The port has already shown that an
 	application with no data container works -- Sileo and TrollStore Helper both launch from
@@ -36,7 +36,7 @@
 	                                       above believe about the process.
 
 	DELIBERATELY ABSENT: anything about the GPU, Metal, IOKit or the display. The driver is
-	reached by dlopen of a world-readable bundle and by IOServiceOpen on RedwoodGPU, and
+	reached by dlopen of a world-readable bundle and by IOServiceOpen on HKGPU, and
 	SpringBoard already does both as mobile with no entitlement of its own for it. An
 	entitlement asked for here that was not needed would be a claim about this port that this
 	measurement had not made.
@@ -44,7 +44,7 @@
 <plist version="1.0">
 <dict>
 	<key>application-identifier</key>
-	<string>com.redwood.triangle</string>
+	<string>com.hackios.triangle</string>
 	<key>com.apple.private.security.no-container</key>
 	<true/>
 	<key>platform-application</key>

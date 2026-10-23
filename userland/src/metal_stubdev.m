@@ -55,7 +55,7 @@
  * returns the object, what has been shown is that this port can hold a Metal device, and
  * NOT that Metal can find one here. The two are reported separately for that reason.
  *
- * Run: /redwood/bin/metal_stubdev [CLASS] [--minimal]   (RC_JOBS=rc.jobs.metaldev)
+ * Run: /hackios/bin/metal_stubdev [CLASS] [--minimal]   (RC_JOBS=rc.jobs.metaldev)
  */
 
 #import <Foundation/Foundation.h>
@@ -346,7 +346,7 @@ minimal_subclass(Class base, long profile, unsigned attempt)
 {
 	char name[64];
 
-	snprintf(name, sizeof(name), "RedwoodMinimalDevice%ld_%u", profile, attempt);
+	snprintf(name, sizeof(name), "HKMinimalDevice%ld_%u", profile, attempt);
 	Class sub = objc_allocateClassPair(base, name, 0);
 	if (sub == Nil) {
 		printf("stubdev: objc_allocateClassPair(%s) failed\n", name);

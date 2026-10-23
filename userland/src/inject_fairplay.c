@@ -1,5 +1,5 @@
 /*
- * libredwood-fairplay.dylib: code of ours inside fairplayd.H2 (see inject.c for how it gets there).
+ * libhackios-fairplay.dylib: code of ours inside fairplayd.H2 (see inject.c for how it gets there).
  *
  * Why. The App Store's front page never loads, and the root of that is not in the store: an
  * AppleMediaServices thread inside appstored sits in a Mach call in _AMSFairPlayGetDeviceType
@@ -84,7 +84,7 @@
  * INTERPOSING CANNOT SEE A LIBSYSTEM-INTERNAL SYSCALL. For arguments to those, the instrument has to
  * be the kernel: systrace already prints the call and the return, and printing the sysctl MIB and
  * the __mac_syscall policy and request beside them is a small addition in the same place
- * (xnu/redwood.patch, systrace_report). That is the next instrument, and it wants a kernel build.
+ * (xnu/hackios.patch, systrace_report). That is the next instrument, and it wants a kernel build.
  * It mattered because this kernel's AMFI stand-in answers exactly two requests, 0x5a and 0x60, and
  * returns ENOPOLICY to every other (bsd/kern/kern_minimac.c), and a daemon refused there would be
  * refused invisibly. MEASURED, AMFI IS CLEARED, and by two roads at once.
@@ -608,7 +608,7 @@ __attribute__((used)) static struct {
 
 __attribute__((constructor))
 static void
-redwood_fairplay_init(void)
+hk_fairplay_init(void)
 {
 	const char *name = getprogname();
 	size_t length = 0;

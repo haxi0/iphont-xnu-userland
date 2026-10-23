@@ -8,7 +8,7 @@
  *     5. [[class alloc] initWithAcceleratorPort:service] -- and that object IS the device
  *
  * The first run of this program answered step 4 (a class built at runtime passes) and
- * then died on step 5: "-[RedwoodMetalDevice initWithAcceleratorPort:]: unrecognized
+ * then died on step 5: "-[HKMetalDevice initWithAcceleratorPort:]: unrecognized
  * selector", although the runtime had just said _MTLDevice implements that selector
  * itself. Both statements were true. The cache says why: the whole body of
  * -[_MTLDevice initWithAcceleratorPort:] (0x181aa8bec) is
@@ -57,7 +57,7 @@
  * nothing is behind it. This program walks the same steps by hand instead, in its own
  * process, where a crash costs a few lines in a log.
  *
- * Run: /redwood/bin/metal_dev   (RC_JOBS=rc.jobs.metaldev)
+ * Run: /hackios/bin/metal_dev   (RC_JOBS=rc.jobs.metaldev)
  */
 
 #import <Foundation/Foundation.h>
@@ -333,9 +333,9 @@ main(void)
 	printf("metal_dev: the service is \"%s\" (port %u)\n", sname, (unsigned)svc);
 	fflush(stdout);
 
-	try_candidate("_MTLDevice", "RedwoodMetalDevice", svc);
-	try_candidate("MTLIOAccelDevice", "RedwoodIOAccelDevice", svc);
-	try_candidate("IOGPUMetalDevice", "RedwoodIOGPUDevice", svc);
+	try_candidate("_MTLDevice", "HKMetalDevice", svc);
+	try_candidate("MTLIOAccelDevice", "HKIOAccelDevice", svc);
+	try_candidate("IOGPUMetalDevice", "HKIOGPUDevice", svc);
 
 	/* The way out of writing Apple's layout down: a driver asks the runtime where each
 	 * ivar is, in the build it is actually running against. */

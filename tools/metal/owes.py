@@ -43,9 +43,9 @@ usage:
           ipsw dyld extract $C $i --output ext                   # the metadata
   done
   clang -target arm64-apple-ios16.5 -isysroot ~/theos/sdks/iPhoneOS16.5.sdk -w -S \
-        userland/src/redwoodmetal.m -o redwoodmetal.s
+        userland/src/hkmetal.m -o hkmetal.s
   owes.py --dump Metal.txt --dump AGXMetalA11.txt --dump IOGPU.txt \
-          --images ext --selmap selmap.txt --asm redwoodmetal.s [--verbose]
+          --images ext --selmap selmap.txt --asm hkmetal.s [--verbose]
 
 The protocol lists come from the dumps, the base classes' method lists come from
 the dumps, and our own come from the source: no step of it asks the runtime,
@@ -62,68 +62,68 @@ import protometh
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Each of our classes, the Apple classes above it (as redwoodmetal.m declares
+# Each of our classes, the Apple classes above it (as hkmetal.m declares
 # them, nearest first), and the protocols its Apple counterpart declares. The
 # counterpart is named so the claim can be checked: AGXA11FamilyCommandQueue
 # really does say <MTLCommandQueueSPI>, and that is where this table comes from.
 CLASSES = {
-    "RedwoodMetalCommandQueue": {
+    "HKMetalCommandQueue": {
         "bases": ["_MTLCommandQueue", "_MTLObjectWithLabel", "NSObject"],
         "protocols": ["MTLCommandQueueSPI"],
         "apple": "AGXA11FamilyCommandQueue : IOGPUMetalCommandQueue <MTLCommandQueueSPI>",
     },
-    "RedwoodMetalCommandBuffer": {
+    "HKMetalCommandBuffer": {
         "bases": ["_MTLCommandBuffer", "_MTLObjectWithLabel", "NSObject"],
         "protocols": ["MTLCommandBufferSPI"],
         "apple": "AGXA11FamilyCommandBuffer : IOGPUMetalCommandBuffer <MTLCommandBufferSPI>",
     },
-    "RedwoodMetalRenderEncoder": {
+    "HKMetalRenderEncoder": {
         "bases": ["_MTLCommandEncoder", "_MTLObjectWithLabel", "NSObject"],
         "protocols": ["MTLRenderCommandEncoderSPI"],
         "apple": "AGXA11FamilyRenderContext : IOGPUMetalRenderCommandEncoder "
                  "<MTLRenderCommandEncoderSPI>",
     },
-    "RedwoodMetalComputeEncoder": {
+    "HKMetalComputeEncoder": {
         "bases": ["_MTLCommandEncoder", "_MTLObjectWithLabel", "NSObject"],
         "protocols": ["MTLComputeCommandEncoderSPI"],
         "apple": "AGXA11FamilyComputeContext : IOGPUMetalComputeCommandEncoder "
                  "<MTLComputeCommandEncoderSPI>",
     },
-    "RedwoodMetalRenderPipeline": {
+    "HKMetalRenderPipeline": {
         "bases": ["_MTLRenderPipelineState", "NSObject"],
         "protocols": ["MTLRenderPipelineStateSPI"],
         "apple": "AGXA11FamilyRenderPipeline : _MTLRenderPipelineState "
                  "<MTLRenderPipelineStateSPI>",
     },
-    "RedwoodMetalComputePipeline": {
+    "HKMetalComputePipeline": {
         "bases": ["_MTLComputePipelineState", "NSObject"],
         "protocols": ["MTLComputePipelineStateSPI"],
         "apple": "AGXA11FamilyComputePipeline : _MTLComputePipelineState "
                  "<MTLComputePipelineStateSPI>",
     },
-    "RedwoodMetalTexture": {
+    "HKMetalTexture": {
         "bases": ["_MTLResource", "_MTLObjectWithLabel", "NSObject"],
         "protocols": ["MTLTextureSPI"],
         "apple": "AGXA11FamilyTexture : IOGPUMetalTexture <MTLTextureSPI>",
     },
-    "RedwoodMetalBuffer": {
+    "HKMetalBuffer": {
         "bases": ["_MTLResource", "_MTLObjectWithLabel", "NSObject"],
         "protocols": ["MTLBuffer", "MTLResourceSPI"],
         "apple": "AGXA11FamilyBuffer : AGXBuffer <MTLBuffer> (its resource half is "
                  "IOGPUMetalResource <MTLResourceSPI>)",
     },
-    "RedwoodMetalSampler": {
+    "HKMetalSampler": {
         "bases": ["_MTLSamplerState", "NSObject"],
         "protocols": ["MTLSamplerStateSPI"],
         "apple": "AGXA11FamilySampler : _MTLSamplerState <MTLSamplerStateSPI>",
     },
-    "RedwoodMetalDepthStencilState": {
+    "HKMetalDepthStencilState": {
         "bases": ["_MTLDepthStencilState", "NSObject"],
         "protocols": ["MTLDepthStencilStateSPI"],
         "apple": "AGXA11FamilyDepthStencilState : _MTLDepthStencilState "
                  "<MTLDepthStencilStateSPI>",
     },
-    "RedwoodMetalDevice": {
+    "HKMetalDevice": {
         "bases": ["_MTLDevice", "NSObject"],
         "protocols": ["MTLDeviceSPI"],
         "apple": "AGXA11FamilyDevice : IOGPUMetalDevice <MTLDeviceSPI>",
@@ -304,12 +304,12 @@ def declared_encodings(images, selmap):
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump", action="append", default=[], required=True)
-    ap.add_argument("--src", default=os.path.join(ROOT, "userland/src/redwoodmetal.m"))
+    ap.add_argument("--src", default=os.path.join(ROOT, "userland/src/hkmetal.m"))
     ap.add_argument("--class", dest="only", action="append", default=[])
     ap.add_argument("--images", help="directory of images extracted with `ipsw dyld extract`")
     ap.add_argument("--selmap", action="append", default=[],
                     help="output of `ipsw dyld objc sel <DSC> -i <image>`")
-    ap.add_argument("--asm", help="assembly of redwoodmetal.m, for the signature check")
+    ap.add_argument("--asm", help="assembly of hkmetal.m, for the signature check")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 

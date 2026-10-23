@@ -1,4 +1,4 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.argbuf).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.argbuf).
 #
 # WHAT THIS BOOT IS FOR: MTLArgumentEncoder, and the buffer OFFSET that goes with it.
 #
@@ -20,7 +20,7 @@
 #   gpu=1              in XL_CMDLINE, or there is no Adreno and no compiler library
 #                      answer; the driver then says so by name and every line below is
 #                      NOT MEASURED rather than a failure.
-#   GL=1 REST=1        in the image, so that /redwood/lib/libredwoodair.dylib is in it,
+#   GL=1 REST=1        in the image, so that /hackios/lib/libhackiosair.dylib is in it,
 #                      and it must be a library built from THIS commit: the encoder's
 #                      records live in that library, and an older one has no
 #                      rwa_argbuf_encoded_members (metal_drv_test says so by name and
@@ -79,14 +79,14 @@
 #     matters to the window server.
 #
 # (the full path on every line: nothing here promises these go through a shell)
-/redwood/bin/metal_drv_test --argbuf /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --argbuf /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
 # The same three again, in a SECOND process of the same boot. Not a repeat for its own
 # sake: the refusals this work replaces were the window server's, every line of this
 # driver now carries the process that wrote it, and two pids in one log is the cheapest
 # way to see that the prefix is per process and not per library. The library is the same
 # one -- clearFragment20 is in it, and AV1SW.metallib has no fragment shader at all, so
 # asking that one would measure nothing and say so.
-/redwood/bin/metal_drv_test --argbuf /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --argbuf /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
 #
 # HOW TO READ THE LOG (logs have NUL bytes, so grep -a always):
 #
@@ -105,13 +105,13 @@
 #       Metal's own implementation answered instead, so the replacement did not take
 #       effect -- and then the dylib in that image is older than this list.
 #
-#   grep -a 'redwoodmetal\[' logs/*-run.log
+#   grep -a 'hkmetal\[' logs/*-run.log
 #       every sentence of the driver, each now carrying the process that provoked it.
 #       This is the boot to check that on: four or five Metal clients are alive.
 #
 #   grep -a 'a non-zero offset is not implemented' logs/*-run.log
 #       MUST BE EMPTY. That sentence is deleted by this commit; a hit means the image
-#       carries an older libredwoodmetal.dylib than this list.
+#       carries an older libhackiosmetal.dylib than this list.
 #
 #   grep -a 'was never filled through an MTLArgumentEncoder' logs/*-run.log
 #       the refusal this feature is mostly made of. Expected empty in this boot -- nothing

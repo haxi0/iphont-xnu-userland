@@ -3,7 +3,7 @@
  *
  * WHY THIS EXISTS, in one measurement. Showing a frame on this port costs 15.46 ms
  * (docs/metal.md 10.43): -getBytes: pulls a finished attachment into the process (11.96 ms,
- * 867 MB/s) and kRedwoodShow pushes it into the kernel (3.50 ms, 2962 MB/s). That is a
+ * 867 MB/s) and kHKShow pushes it into the kernel (3.50 ms, 2962 MB/s). That is a
  * ceiling of 64.7 frames a second with nothing drawn, and about twelve of those
  * milliseconds exist for one reason only: there is nowhere else to put the picture. A
  * drawable is that somewhere else -- memory the display controller already scans out -- and
@@ -39,10 +39,10 @@
  *
  * HOW THE MEMORY GETS HERE. Four layers, and all four now exist:
  *
- *   the kernel     kRedwoodSurface (0x7e) turns an IOSurface into a GPU buffer and reports
- *                  its size, offset, row length and geometry (RedwoodGPU.cpp:821)
+ *   the kernel     kHKSurface (0x7e) turns an IOSurface into a GPU buffer and reports
+ *                  its size, offset, row length and geometry (HKGPU.cpp:821)
  *   the DRM shim   drmPrimeFDToHandle(fd, surface_id, &handle) -- the ID goes where Linux
- *                  puts a dmabuf descriptor (tools/mesa/redwood-drm/redwood_drm.c:189)
+ *                  puts a dmabuf descriptor (tools/mesa/hackios-drm/hk_drm.c:189)
  *   freedreno      fd_bo_from_dmabuf_drm takes it ("what comes in here is an IOSurface, and
  *                  the file descriptor its ID"), and fd_resource_from_handle lays a resource
  *                  over it with one pitch
@@ -71,11 +71,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "redwood_drawable.h"
+#include "hk_drawable.h"
 
 /*
  * The two requests this file needs, by the numbers the kernel answers them on
- * (xnu/files/iokit/Kernel/RedwoodGPU.cpp:78-95): kRedwoodSurface is this port's own and
+ * (xnu/files/iokit/Kernel/HKGPU.cpp:78-95): kHKSurface is this port's own and
  * kDrmGemClose is Linux's. Repeated here rather than shared for the reason the structs are
  * repeated, and it is two lines.
  */
@@ -99,7 +99,7 @@ rwd_say(char *why, size_t why_size, const char *format, ...)
 int
 rwd_gpu_open(io_connect_t *connection, char *why, size_t why_size)
 {
-	io_service_t service = IOServiceGetMatchingService(0, IOServiceMatching("RedwoodGPU"));
+	io_service_t service = IOServiceGetMatchingService(0, IOServiceMatching("HKGPU"));
 	kern_return_t result;
 
 	if (connection == NULL) {
@@ -108,7 +108,7 @@ rwd_gpu_open(io_connect_t *connection, char *why, size_t why_size)
 	}
 	*connection = 0;
 	if (service == IO_OBJECT_NULL) {
-		rwd_say(why, why_size, "no RedwoodGPU service: this kernel was booted without "
+		rwd_say(why, why_size, "no HKGPU service: this kernel was booted without "
 		    "gpu=1, so there is no GPU to give a surface to");
 		return -1;
 	}
@@ -116,7 +116,7 @@ rwd_gpu_open(io_connect_t *connection, char *why, size_t why_size)
 	IOObjectRelease(service);
 	if (result != KERN_SUCCESS) {
 		*connection = 0;
-		rwd_say(why, why_size, "RedwoodGPU refused a user client: %#x", result);
+		rwd_say(why, why_size, "HKGPU refused a user client: %#x", result);
 		return -1;
 	}
 	return 0;
@@ -133,9 +133,9 @@ rwd_gpu_close(io_connect_t connection)
 /*
  * The connection a drawable's buffer lives on, opened once and never closed.
  *
- * This is not a convenience, it is the buffer's lifetime. A buffer made by kRedwoodSurface
+ * This is not a convenience, it is the buffer's lifetime. A buffer made by kHKSurface
  * belongs to the user client that asked for it, and IOSurfaceRootUserClient's and
- * RedwoodGPUUserClient's clientClose free what their client held -- so a connection closed
+ * HKGPUUserClient's clientClose free what their client held -- so a connection closed
  * while a texture still refers to its buffer takes the texture's memory with it. One
  * connection for the process, kept for as long as the process has textures, is the only
  * lifetime that is right, and it costs one Mach port.
@@ -155,15 +155,15 @@ rwd_shared_connection(void)
 		opened = 1;
 		if (rwd_gpu_open(&connection, why, sizeof(why)) != 0) {
 			connection = 0;
-			printf("redwooddrawable: %s\n", why);
+			printf("hkdrawable: %s\n", why);
 		}
 	}
 	return connection;
 }
 
 /*
- * One kRedwoodSurface call. The kernel takes the struct in and hands the same struct back
- * filled (RedwoodGPU.cpp:1283 and the common copy at the end of externalMethod), so in and
+ * One kHKSurface call. The kernel takes the struct in and hands the same struct back
+ * filled (HKGPU.cpp:1283 and the common copy at the end of externalMethod), so in and
  * out are one buffer of one size, and asking for fewer bytes back than were sent loses the
  * tail of the answer -- which is the one way to misuse this request.
  */
@@ -176,7 +176,7 @@ rwd_surface_call(io_connect_t connection, struct rwd_surface *surface, const cha
 	kern_return_t result;
 
 	if (connection == 0) {
-		rwd_say(why, why_size, "no connection to RedwoodGPU to %s a surface with", what);
+		rwd_say(why, why_size, "no connection to HKGPU to %s a surface with", what);
 		return -1;
 	}
 	result = IOConnectCallStructMethod(connection, RWD_REQUEST_SURFACE, surface,
@@ -187,7 +187,7 @@ rwd_surface_call(io_connect_t connection, struct rwd_surface *surface, const cha
 		 * those two are translated. kIOReturnNotFound (0xe00002f0) is a surface ID the
 		 * kernel's table does not hold -- a surface from another process that was never
 		 * made shareable, or one already released. kIOReturnUnsupported (0xe00002c7) has
-		 * exactly one cause here (RedwoodGPU.cpp:830): the surface was built around
+		 * exactly one cause here (HKGPU.cpp:830): the surface was built around
 		 * memory the process already had, which is neither whole pages nor in rows the
 		 * GPU takes.
 		 */
@@ -287,7 +287,7 @@ rwd_surface_id(void *iosurface)
 		*(void **)&get_id = dlsym(RTLD_DEFAULT, "IOSurfaceGetID");
 		looked = 1;
 		if (get_id == NULL) {
-			printf("redwooddrawable: this process has no IOSurfaceGetID, so a "
+			printf("hkdrawable: this process has no IOSurfaceGetID, so a "
 			       "surface cannot be named to the kernel\n");
 		}
 	}
@@ -439,7 +439,7 @@ rwd_format_of_metal(unsigned metal_pixel_format, uint32_t *fourcc, unsigned *byt
 		 * exists to avoid. The three things it needs are in docs/metal.md 10.46. */
 		rwd_say(why, why_size, "pixel format %u is %s: YCbCr in TWO PLANES, and this "
 		    "import serves one. Missing: per-plane offset and row length from the kernel "
-		    "(kRedwoodSurface reports only the count, RedwoodGPU.cpp:849), a Gallium "
+		    "(kHKSurface reports only the count, HKGPU.cpp:849), a Gallium "
 		    "format for a biplanar Metal texture, and a YCbCr-to-RGB conversion. Refused "
 		    "whole rather than served as its luma plane, which would composite grey and "
 		    "look like a bug elsewhere", metal_pixel_format,
@@ -484,14 +484,14 @@ rwd_format_of_metal(unsigned metal_pixel_format, uint32_t *fourcc, unsigned *byt
 /*
  * The import call of the compiler library, if it has one.
  *
- * It is looked up rather than linked for the same reason src/redwoodmetal.m dlopens the
+ * It is looked up rather than linked for the same reason src/hkmetal.m dlopens the
  * library at all, and with RTLD_NOLOAD so that this file never loads a second copy: dyld
  * uniques images by install_name, so a handle asked for this way is the one the driver
  * already has, or nothing when the driver never got one.
  *
  * The signature is tools/mesa/air/air_metal.h's, field for field: the shape the caller wants,
  * the surface by its ID (which is where freedreno's import takes it --
- * drmPrimeFDToHandle(fd, surface, &handle) in tools/mesa/redwood-drm/redwood_drm.c:189), and
+ * drmPrimeFDToHandle(fd, surface, &handle) in tools/mesa/hackios-drm/hk_drm.c:189), and
  * the row length and offset the kernel reported, because fd_resource_from_handle takes those
  * from the caller and does not ask the kernel again.
  */
@@ -507,13 +507,13 @@ rwd_import(void)
 	static int looked;
 
 	if (!looked) {
-		void *library = dlopen("/redwood/lib/libredwoodair.dylib", RTLD_NOW | RTLD_NOLOAD);
+		void *library = dlopen("/hackios/lib/libhackiosair.dylib", RTLD_NOW | RTLD_NOLOAD);
 
 		looked = 1;
 		if (library != NULL) {
 			*(void **)&import = dlsym(library, "rwa_texture_from_surface");
 		}
-		printf("redwooddrawable: the compiler library %s, and %s "
+		printf("hkdrawable: the compiler library %s, and %s "
 		       "rwa_texture_from_surface\n",
 		    library != NULL ? "is loaded in this process" : "is not loaded here",
 		    import != NULL ? "has" : "has NOT");
@@ -571,7 +571,7 @@ rwd_texture_for_surface(struct rwa_device *mesa_device, void *iosurface, unsigne
 	}
 	connection = rwd_shared_connection();
 	if (connection == 0) {
-		rwd_say(why, why_size, "no connection to RedwoodGPU: this kernel was booted "
+		rwd_say(why, why_size, "no connection to HKGPU: this kernel was booted "
 		    "without gpu=1, so a surface's memory cannot be given to the GPU");
 		return NULL;
 	}

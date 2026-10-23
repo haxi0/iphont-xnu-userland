@@ -9,7 +9,7 @@
  * here -- what is needed is that the bytes come back. So the tree is packed into a plain archive
  * and the archive is written into the one place on the phone's flash this port owns and nothing of
  * it uses: the partition darwin, past the iOS volume and both cryptexes. The kernel takes those
- * writes on /dev/rufs_darwin alone and refuses anything else (bsd/dev/redwood_ufs.c, ufs_write=1).
+ * writes on /dev/rufs_darwin alone and refuses anything else (bsd/dev/hk_ufs.c, ufs_write=1).
  *
  *   var_store save          pack /private/var into the store
  *   var_store load          unpack the newest good store into /private/var (init, at boot)
@@ -18,16 +18,17 @@
  *   var_store show          what the store holds, both slots
  *   var_store erase         forget both slots (the next boot starts empty again)
  *   var_store stamp PATH    write a line into PATH saying when: a marker for a run
+ *   var_store bootok        tell the loader's boot guard that this generation came up
  *
- * Nobody has to remember to save. `watch` registers with the kernel (kern.redwood.var_save), and
+ * Nobody has to remember to save. `watch` registers with the kernel (kern.hackios.var_save), and
  * on the orderly way back to the loader -- the run's time up, or "xl stop" -- the kernel asks it
- * for the volume and waits, bounded, before it goes (bsd/dev/redwood_ufs.c,
- * redwood_var_save_on_return). A save every SECS seconds is there as well but is not the default:
+ * for the volume and waits, bounded, before it goes (bsd/dev/hk_ufs.c,
+ * hk_var_save_on_return). A save every SECS seconds is there as well but is not the default:
  * one costs seconds of the run and a hundred-odd megabytes of flash, and while it runs the
  * storage is read through the loader rather than through this kernel's own driver.
  *
  * One saver at a time: a write to the store is refused unless the writer holds the claim
- * (kern.redwood.var_busy), so two of them cannot interleave into one slot. Even if they did, the
+ * (kern.hackios.var_busy), so two of them cannot interleave into one slot. Even if they did, the
  * slot being written is never the one holding the newest good archive, and a header is written
  * last and over a zeroed one -- so the worst an interrupted or doubled save can do is lose itself.
  *
@@ -39,6 +40,11 @@
  * `load` reads the archive twice: once to see that its checksum is the one in the header, and only
  * then to make files. A store that was torn or is half a different archive therefore leaves
  * /private/var as init made it rather than half filled.
+ *
+ * The boot guard (xnuloader/flashboot.c in hackios-xnu-kernel): the loader counts every start of a boot
+ * bundle in a block of darwin's boot area and gives up on a generation that was started three times
+ * without coming up. `bootok` is the "came up": the watcher says it once the run has lasted
+ * BOOTOK_AFTER seconds, so a kernel or a userland that dies early is rolled back by itself.
  *
  * What is left out: sockets and devices, which the daemons of a new boot make for themselves, and
  * the directories in SKIP below, which hold what only this boot can mean (its runtime sockets, its
@@ -52,6 +58,8 @@
 #define SLOT_BYTES      0x80000000LL            /* 2 GiB a slot, two slots */
 #define SLOTS           2
 #define DEVICE          "/dev/rufs_darwin"
+#define STATE_AT        8566865920LL            /* darwin's block 2091520: the boot state (common/flash/bundlefmt.py) */
+#define BOOTOK_AFTER    60                      /* seconds of a run that make it a good start */
 #define ROOT            "/private/var"
 #define MAX_PATH        1024
 #define MAX_DEPTH       32
@@ -168,7 +176,7 @@ sysctl_set_int(const char *name, int value)
 static int
 claim(void)
 {
-	if (sysctl_set_int("kern.redwood.var_busy", 1) != 0) {
+	if (sysctl_set_int("kern.hackios.var_busy", 1) != 0) {
 		printf("var_store: the store is claimed by another saver (%s)\n", strerror(errno));
 		return 0;
 	}
@@ -178,7 +186,7 @@ claim(void)
 static void
 release(void)
 {
-	(void)sysctl_set_int("kern.redwood.var_busy", 0);
+	(void)sysctl_set_int("kern.hackios.var_busy", 0);
 }
 
 /* ---- checksum (the same one the loader reads a write back with) ---- */
@@ -1246,7 +1254,7 @@ save_once(void)
 	/*
 	 * The device is opened for the save and closed again, not held: while a write is in flight
 	 * this kernel's own transfer list is out of the controller, and it goes back in when the
-	 * device is closed (bsd/dev/redwood_ufs.c, ufs_cclose). A watcher that kept the device open
+	 * device is closed (bsd/dev/hk_ufs.c, ufs_cclose). A watcher that kept the device open
 	 * would leave iOS reading the flash through the loader for the rest of the run.
 	 */
 	fd = open(DEVICE, O_RDWR, 0);
@@ -1258,6 +1266,71 @@ save_once(void)
 	release();
 	close(fd);
 	fd = -1;
+	return ok;
+}
+
+/* The boot state's block, as the loader keeps it (the layout: common/flash/bundlefmt.py). */
+struct boot_state {
+	char magic[8];
+	uint64_t trying, tries_flags;    /* tries_flags: u32 tries, u32 flags */
+	uint64_t good, boots, bad, sum;
+};
+
+static uint64_t
+fnv64(const void *data, uint64_t n)
+{
+	const uint8_t *p = data;
+	uint64_t h = 0xcbf29ce484222325ULL;
+
+	for (uint64_t i = 0; i < n; i++) {
+		h ^= p[i];
+		h *= 0x100000001b3ULL;
+	}
+	return h;
+}
+
+/* This start came up: the generation the loader is trying is a good one. */
+static int
+bootok(void)
+{
+	static uint8_t block[BLOCK] __attribute__((aligned(BLOCK)));
+	struct boot_state st;
+	int ok;
+
+	fd = open(DEVICE, O_RDWR, 0);
+	if (fd < 0) {
+		printf("var_store: bootok: %s: %s\n", DEVICE, strerror(errno));
+		return 0;
+	}
+	ok = device_read(STATE_AT, block, BLOCK);
+	memcpy(&st, block, sizeof(st));
+	if (!ok || memcmp(st.magic, "HKSTATE1", 8) != 0 || fnv64(&st, 48) != st.sum) {
+		printf("var_store: bootok: no boot state (not started from darwin): nothing to say\n");
+		close(fd);
+		fd = -1;
+		return 1;
+	}
+	if (st.good == st.trying && (uint32_t)st.tries_flags == 0) {
+		printf("var_store: bootok: generation %llu is already known good\n", (unsigned long long)st.good);
+		close(fd);
+		fd = -1;
+		return 1;
+	}
+	st.good = st.trying;
+	st.tries_flags &= ~0xffffffffULL;        /* tries = 0, the flags kept */
+	if (st.bad == st.trying) {
+		st.bad = 0;
+	}
+	st.sum = fnv64(&st, 48);
+	memcpy(block, &st, sizeof(st));
+	ok = claim() && device_write(STATE_AT, block, BLOCK);
+	release();
+	close(fd);
+	fd = -1;
+	if (ok) {
+		printf("var_store: bootok: generation %llu came up (start %llu)\n", (unsigned long long)st.good,
+		    (unsigned long long)st.boots);
+	}
 	return ok;
 }
 
@@ -1275,7 +1348,7 @@ watch(int seconds)
 	}
 	close(fd);
 	fd = -1;
-	if (sysctl_set_int("kern.redwood.var_save", VAR_SAVE_IDLE) != 0) {
+	if (sysctl_set_int("kern.hackios.var_save", VAR_SAVE_IDLE) != 0) {
 		printf("var_store: this kernel does not keep the data volume (%s)\n", strerror(errno));
 		return 0;
 	}
@@ -1287,11 +1360,17 @@ watch(int seconds)
 		gettimeofday(&tv, NULL);
 		last = (uint64_t)tv.tv_sec;
 	}
-	for (;;) {
+	for (uint64_t started = last, said_ok = 0;;) {
 		struct timeval tv = { 0, 0 };
 		int state = VAR_SAVE_NONE;
 
-		if (sysctl_int("kern.redwood.var_save", &state) == 0 && state == VAR_SAVE_WANTED) {
+		gettimeofday(&tv, NULL);
+		if (!said_ok && (uint64_t)tv.tv_sec - started >= BOOTOK_AFTER) {
+			said_ok = 1;
+			(void)bootok();
+		}
+
+		if (sysctl_int("kern.hackios.var_save", &state) == 0 && state == VAR_SAVE_WANTED) {
 			asked = 1;
 		}
 		gettimeofday(&tv, NULL);
@@ -1304,7 +1383,7 @@ watch(int seconds)
 			last = (uint64_t)tv.tv_sec;
 			if (asked) {
 				/* answered either way: the kernel is waiting on this to go back to the loader */
-				(void)sysctl_set_int("kern.redwood.var_save", VAR_SAVE_DONE);
+				(void)sysctl_set_int("kern.hackios.var_save", VAR_SAVE_DONE);
 				return ok;
 			}
 		}
@@ -1362,6 +1441,9 @@ main(int argc, char **argv, char **envp)
 
 	(void)envp;
 	crc_init();
+	if (strcmp(what, "bootok") == 0) {
+		return bootok() ? 0 : 1;
+	}
 	if (strcmp(what, "stamp") == 0) {
 		return stamp(argc > 2 ? argv[2] : "/private/var/redwood-stamp") ? 0 : 1;
 	}

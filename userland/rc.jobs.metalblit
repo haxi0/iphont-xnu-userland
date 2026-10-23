@@ -1,4 +1,4 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.metalblit).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.metalblit).
 # The Metal driver's blit encoder (copies, fill, mipmaps) through Metal's own API, each result
 # compared with bytes computed by the test; see blit_test in src/metal_drv_test.m.
-/redwood/bin/metal_drv_test --blit
+/hackios/bin/metal_drv_test --blit

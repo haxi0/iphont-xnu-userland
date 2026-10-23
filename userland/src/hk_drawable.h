@@ -1,7 +1,7 @@
 /*
  * The drawable side of the Metal driver: an IOSurface of CoreAnimation's as a texture.
  *
- * Why this is a file of its own. Everything in src/redwoodmetal.m answers Metal; this
+ * Why this is a file of its own. Everything in src/hkmetal.m answers Metal; this
  * answers CoreAnimation, and the two meet in exactly one method --
  * -newTextureWithDescriptor:iosurface:plane:. Keeping it apart means the surface bridge can
  * be read, and refused, without reading the 865 answers next to it.
@@ -14,14 +14,14 @@
  * whoever asks, and what it can and cannot lay over one is what its refusals are about.
  *
  * What this does NOT contain: a texture class. The object Metal gets back has to be the
- * driver's own RedwoodMetalTexture, because that is what the render encoder binds, so
- * this side stops at `struct rwa_texture *` and src/redwoodmetal.m wraps it. The split is
+ * driver's own HKMetalTexture, because that is what the render encoder binds, so
+ * this side stops at `struct rwa_texture *` and src/hkmetal.m wraps it. The split is
  * deliberate: the surface, its geometry and every refusal are here, and the Objective-C
  * object stays where its class is.
  */
 
-#ifndef REDWOOD_DRAWABLE_H
-#define REDWOOD_DRAWABLE_H
+#ifndef HK_DRAWABLE_H
+#define HK_DRAWABLE_H
 
 #include <IOKit/IOKitLib.h>
 #include <stddef.h>
@@ -35,10 +35,10 @@ struct rwa_device;
 struct rwa_texture;
 
 /*
- * What the kernel answers about an IOSurface, and the request it answers in: kRedwoodSurface
- * (0x7e) on RedwoodGPUUserClient, `struct redwood_surface` in
- * xnu/files/iokit/Kernel/RedwoodGPU.cpp. Field for field the same, and declared here rather
- * than included for the reason src/redwoodmetal.m gives for the Mesa contract: userland/build.sh
+ * What the kernel answers about an IOSurface, and the request it answers in: kHKSurface
+ * (0x7e) on HKGPUUserClient, `struct hk_surface` in
+ * xnu/files/iokit/Kernel/HKGPU.cpp. Field for field the same, and declared here rather
+ * than included for the reason src/hkmetal.m gives for the Mesa contract: userland/build.sh
  * knows nothing of the kernel tree.
  *
  * The struct goes in and comes back out of the same call, so `handle` is both the question
@@ -53,7 +53,7 @@ struct rwd_surface {
 	uint32_t pixelFormat, planes;     /* because MiniIOSurface substitutes some formats */
 };
 
-#define RWD_DESCRIBE 0xffffffffu          /* kRedwoodDescribe: answer, allocate nothing */
+#define RWD_DESCRIBE 0xffffffffu          /* kHKDescribe: answer, allocate nothing */
 
 /*
  * The shape, in the same fields and the same order as `struct rwa_texture_shape`
@@ -69,7 +69,7 @@ struct rwd_texture_shape {
 
 /*
  * The GPU service, opened and closed. This is the same service and the same user client
- * src/redwoodmetal.m already opens for the device; a second connection is cheap and keeps
+ * src/hkmetal.m already opens for the device; a second connection is cheap and keeps
  * this file from reaching into that one's statics.
  *
  * 0, or -1 and a sentence in `why`. A kernel booted without gpu=1 has no such service, and
@@ -89,7 +89,7 @@ void rwd_gpu_close(io_connect_t connection);
  * kIOReturnUnsupported from `take` has one named cause and it is worth telling apart from
  * the rest: a surface built around memory the process already had (IOSurfaceAddress) is
  * refused by the kernel, because such memory is neither whole pages nor in rows the GPU
- * takes (RedwoodGPU.cpp:830). Nothing on CoreAnimation's Metal path builds one -- neither
+ * takes (HKGPU.cpp:830). Nothing on CoreAnimation's Metal path builds one -- neither
  * CA::SurfaceUtil::CAIOSurfaceCreate nor CA::Render::create_iosurface_with_pixel_format
  * has a parameter to pass memory in -- but a surface handed to us by an application might
  * be, so the sentence says which it was.
@@ -159,7 +159,7 @@ int rwd_format_of_metal(unsigned metal_pixel_format, uint32_t *fourcc,
  * Objective-C object.
  *
  * `want` is the shape the caller read out of the MTLTextureDescriptor; `mesa_device` is the
- * value of -[RedwoodMetalDevice mesaDevice]. On success the surface's buffer is taken, a
+ * value of -[HKMetalDevice mesaDevice]. On success the surface's buffer is taken, a
  * texture over it is returned, and `took` carries the kernel's answer so the caller can give
  * the buffer back when the texture dies. On failure NULL and a sentence, and nothing is left
  * taken.
@@ -198,4 +198,4 @@ int rwd_import_available(void);
 }
 #endif
 
-#endif /* REDWOOD_DRAWABLE_H */
+#endif /* HK_DRAWABLE_H */

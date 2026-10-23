@@ -1,4 +1,4 @@
-# Commands run by the launchd job com.redwood.demo (see com.redwood.demo.plist).
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
 #
 # The six texture shaders that return the exact texel on softpipe, run on the real Adreno
 # (RC_JOBS=rc.jobs.airtex). This is the question softpipe cannot answer: it takes a
@@ -18,9 +18,9 @@
 # arithmetic, so a mismatch here can only be binding or descriptors -- the narrowest
 # failure this test will ever have. Read each "on ..." line before its numbers.
 # (the full path on every line: nothing here promises these go through a shell)
-/redwood/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment2DFloat
-/redwood/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment3DFloat
-/redwood/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment2DInt
-/redwood/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment3DInt
-/redwood/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment2DUInt
-/redwood/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment3DUInt
+/hackios/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment2DFloat
+/hackios/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment3DFloat
+/hackios/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment2DInt
+/hackios/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment3DInt
+/hackios/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment2DUInt
+/hackios/bin/air_run /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib texturedFragment3DUInt

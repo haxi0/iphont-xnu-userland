@@ -1,5 +1,5 @@
-# Commands run by the launchd job com.redwood.demo (RC_JOBS=rc.jobs.metaltime).
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.metaltime).
 # The blits and rc.jobs.metalperf's timings alone: boot it once with metal_sync=1 and once without
 # to compare a fence per draw with a fence per command buffer on the same images.
-/redwood/bin/metal_drv_test --blit
-/redwood/bin/metal_drv_test --time 32 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/hackios/bin/metal_drv_test --blit
+/hackios/bin/metal_drv_test --time 32 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
