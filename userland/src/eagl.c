@@ -123,6 +123,7 @@ typedef GLDEBUGPROC GLDEBUGPROCKHR;
 #define GL_DRAW_FRAMEBUFFER_BINDING     0x8ca6
 #define GL_COLOR_BUFFER_BIT             0x4000
 #define GL_NEAREST                      0x2600
+#define GL_LINEAR                       0x2601
 #define GL_LINES                        0x0001
 #define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE 0x8cd0
 #define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME 0x8cd1
@@ -250,6 +251,13 @@ struct eagl {
 	GLuint colour;                  /* ... and the texture that is its colour attachment (0: none, or no texture) */
 	GLuint reader;                  /* a framebuffer of ours, to read a texture back */
 	GLuint writer;                  /* ... and one to copy a frame into its surface with (blit_targets) */
+	GLuint panel;                   /* ... and one to scale a frame into the panel's framebuffer with (panel_scale()) */
+	GLuint panel_texture[2];        /* the panel's two framebuffers as textures, */
+	uint32_t panel_surface[2];      /* ... the surfaces they were made of */
+	struct {
+		uint32_t index, surface;
+	} panel_ready[4];               /* frames scaled into one, to be said once they have gone to the GPU */
+	unsigned panel_ready_count;
 	GLuint program;                 /* the one in use, as CoreAnimation has it */
 	GLuint plain, lookup;           /* programs of ours for when that is none (plain_draw_begin()) */
 	GLint plain_matrix, plain_textured, lookup_matrix;
@@ -1019,6 +1027,137 @@ frame_begin(struct eagl *e)
 }
 
 /*
+ * The display's scaling, done by the GPU (the kernel's boot-arg fb_gpu, MiniIOMobileFramebuffer.cpp): a frame
+ * of the display's size is scaled, once drawn, into one of the panel's two framebuffers, which the kernel lends
+ * for it (selector 200) and then pushes to the panel as it is, told that the frame is there (201) once it has
+ * gone to the GPU. Where any of that is not to be had, the kernel scales the frame with the processor, as
+ * before.
+ */
+#define FB_PANEL_ACQUIRE        200
+#define FB_PANEL_READY          201
+#define FB_DISPLAY_SIZE         8
+static io_connect_t panel_fb;
+static int panel_state;                 /* 0: not asked yet, 1: in use, -1: not to be had */
+static uint64_t display_size[2];
+static unsigned panel_not_ready;        /* frames in a row the driver had none to lend, not yet pushing */
+
+static bool
+panel_open(void)
+{
+	io_service_t service = IOServiceGetMatchingService(0, IOServiceMatching("IOMobileFramebuffer"));
+	uint32_t count = 2;
+	kern_return_t kr;
+
+	if (service == 0) {
+		return false;
+	}
+	kr = IOServiceOpen(service, mach_task_self(), 0, &panel_fb);
+	IOObjectRelease(service);
+	if (kr != KERN_SUCCESS) {
+		return false;
+	}
+	kr = IOConnectCallScalarMethod(panel_fb, FB_DISPLAY_SIZE, NULL, 0, display_size, &count);
+	if (kr != KERN_SUCCESS || count != 2) {
+		IOServiceClose(panel_fb);
+		return false;
+	}
+	return true;
+}
+
+/* After the frame of `image` is complete in the texture CoreAnimation drew it into. */
+static void
+panel_scale(struct eagl *e, struct image *image)
+{
+	uint64_t out[5] = { 0 };
+	uint32_t count = 5, index;
+	GLint read = 0, draw = 0, bound = 0;
+	GLboolean scissored;
+	kern_return_t kr;
+
+	if (panel_state < 0 || e->panel_ready_count == sizeof(e->panel_ready) / sizeof(e->panel_ready[0])) {
+		return;
+	}
+	if (panel_state == 0) {
+		panel_state = panel_open() ? 1 : -1;
+		say("redwood-gl: the panel's framebuffers %s\n", panel_state > 0 ? "asked for, for frames of the display's size" :
+		    "not to be had: the display's driver scales the frames");
+	}
+	if (panel_state < 0 || (uint64_t)image->width != display_size[0] || (uint64_t)image->height != display_size[1]) {
+		return;
+	}
+	kr = IOConnectCallScalarMethod(panel_fb, FB_PANEL_ACQUIRE, NULL, 0, out, &count);
+	if (kr == kIOReturnNotReady && ++panel_not_ready == 300) {
+		say("redwood-gl: the display's driver lends no framebuffer (fb_gpu=0, or not this phone): it scales the frames\n");
+		panel_state = -1;
+	}
+	if (kr == kIOReturnBusy || kr == kIOReturnNotReady) {
+		return;                 /* (none free in time, or not yet pushing: this frame is scaled by the processor) */
+	}
+	panel_not_ready = 0;
+	if (kr != KERN_SUCCESS || count != 5 || out[0] > 1) {
+		say("redwood-gl: the panel's framebuffers: %#x; the display's driver scales the frames\n", kr);
+		panel_state = -1;
+		return;
+	}
+	index = (uint32_t)out[0];
+	if (e->panel_surface[index] != (uint32_t)out[1]) {
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+		if (e->panel_texture[index] == 0) {
+			glGenTextures(1, &e->panel_texture[index]);
+		}
+		glBindTexture(GL_TEXTURE_2D, e->panel_texture[index]);
+		if (!redwood_gl_surface_texture(e->gl, (uint32_t)out[1])) {
+			glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+			say("redwood-gl: the panel's framebuffer %u (surface %u) cannot be drawn into; the display's driver scales the "
+			    "frames\n", index, (uint32_t)out[1]);
+			panel_state = -1;
+			return;
+		}
+		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+		e->panel_surface[index] = (uint32_t)out[1];
+		say("redwood-gl: the panel's framebuffer %u is surface %u, %llu x %llu, %llu bytes a row\n", index,
+		    (uint32_t)out[1], out[2], out[3], out[4]);
+	}
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	scissored = glIsEnabled(GL_SCISSOR_TEST);
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	if (e->panel == 0) {
+		glGenFramebuffers(1, &e->panel);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->panel);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->panel_texture[index], 0);
+	/* (the whole frame: the other framebuffer, not this one, holds the frame before) */
+	glDisable(GL_SCISSOR_TEST);
+	glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? (GLint)out[3] : 0, (GLint)out[2],
+	    image->invert ? 0 : (GLint)out[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	if (scissored) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	e->panel_ready[e->panel_ready_count].index = index;
+	e->panel_ready[e->panel_ready_count].surface = IOSurfaceGetID(image->surface);
+	e->panel_ready_count++;
+}
+
+/* What was scaled has gone to the GPU: the kernel may push it with the swap that follows. */
+static void
+panel_said(struct eagl *e)
+{
+	for (unsigned i = 0; i < e->panel_ready_count; i++) {
+		uint64_t in[2] = { e->panel_ready[i].index, e->panel_ready[i].surface };
+
+		(void)IOConnectCallScalarMethod(panel_fb, FB_PANEL_READY, in, 2, NULL, NULL);
+	}
+	e->panel_ready_count = 0;
+}
+
+/*
  * glFlush, glFinish: what was drawn must be where the display takes it from. `finished`: the
  * library has been waited for already.
  */
@@ -1035,10 +1174,12 @@ frame_end(struct eagl *e, bool finished)
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
+			panel_scale(e, &e->images[i]);
 			in_place++;
 			glFlush();                              /* (also after a glFinish: the copy is new since) */
 		}
 		if (e->images[i].target && e->images[i].drawn && e->images[i].shared) {
+			panel_scale(e, &e->images[i]);
 			in_place++;
 		}
 	}
@@ -1059,6 +1200,12 @@ frame_end(struct eagl *e, bool finished)
 			(void)glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
 			glDeleteSync(sync);
 		}
+	}
+	if (e->panel_ready_count != 0) {
+		if (!finished && !wait_for_frames && !sync_frames) {
+			glFinish();             /* (the kernel takes the frame's GPU work as it is when told: it must be there) */
+		}
+		panel_said(e);
 	}
 	waited = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
