@@ -1,0 +1,19 @@
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.metalapps, with gpu=1 metal=2
+# metal_profile=1; XL_SECS=300). Apple's own applications that draw with Metal, each started by its
+# bundle identifier and left for a while, then the process list: what is missing of the driver shows
+# as hkmetal[...] lines ("not implemented", "refused", an unrecognized selector) or as an application
+# that is not in the second list. The lock screen goes first, as in every list that wants the home screen.
+# first the driver's own fences, events and heaps, through Metal's public API
+/hackios/bin/metal_sync_test
+/hackios/bin/rwtouch wait 20 swipe 0.5 0.985 0.5 0.3 250 wait 4
+/hackios/bin/battery_test launch com.apple.weather
+/hackios/bin/rwtouch wait 25
+/bin/ps -A
+/hackios/bin/battery_test launch com.apple.Maps
+/hackios/bin/rwtouch wait 25
+/bin/ps -A
+/hackios/bin/battery_test launch com.apple.mobileslideshow
+/hackios/bin/rwtouch wait 15
+/hackios/bin/battery_test launch com.apple.measure
+/hackios/bin/rwtouch wait 15
+/bin/ps -A

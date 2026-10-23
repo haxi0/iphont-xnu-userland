@@ -238,6 +238,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		# and the program that walks Metal's own steps 4 and 5 against it
 		$DYN -framework Foundation -framework IOKit -framework Metal -lobjc \
 			-o obj/metal_drv_test src/metal_drv_test.m
+		# fences, events, shared events and heaps through Metal's public API (src/metal_sync_test.m)
+		$DYN -fobjc-arc -framework Foundation -framework Metal -o obj/metal_sync_test src/metal_sync_test.m
 		# An application of this port's own: a window, a CAMetalLayer, a drawable and a
 		# triangle in it (src/triangle_app.m). UIKit because that is the point -- every
 		# Metal result so far is from inside one of Apple's daemons, and this is an
@@ -374,6 +376,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/metal_dev ] && cp obj/metal_dev root/bin/
 	[ -f obj/metal_stubdev ] && cp obj/metal_stubdev root/bin/
 	[ -f obj/metal_drv_test ] && cp obj/metal_drv_test root/bin/
+	[ -f obj/metal_sync_test ] && cp obj/metal_sync_test root/bin/
 	[ -f obj/metal_caps ] && cp obj/metal_caps root/bin/
 	[ -f obj/metal_props ] && cp obj/metal_props root/bin/
 	[ -f obj/shm_test ] && cp obj/shm_test root/bin/

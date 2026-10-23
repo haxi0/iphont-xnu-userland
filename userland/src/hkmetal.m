@@ -1004,6 +1004,8 @@ struct gem_close { uint32_t handle, pad; };
 - (instancetype)initWithHKQueue:(HKMetalCommandQueue *)queue;
 - (void)recordWork:(HKMetalWork *)work;
 - (id)device;
+/* runs what was recorded from where it stopped: at -commit, and again when an event it waits for is signalled */
+- (void)hkRun;
 @end
 
 @interface HKMetalComputeEncoder : _MTLCommandEncoder
@@ -1057,6 +1059,7 @@ struct gem_close { uint32_t handle, pad; };
 - (unsigned)vertexElementAttribute:(unsigned)index;
 @end
 
+@class HKMetalEvent;
 @interface HKMetalWork : NSObject {
 @public
 	HKMetalComputePipeline *pipeline;
@@ -1109,8 +1112,15 @@ struct gem_close { uint32_t handle, pad; };
 	unsigned fromSlice, fromLevel, toSlice, toLevel;
 	unsigned fromOrigin[3], toOrigin[3], blitSize[3];
 	uint8_t fillValue;
+	/* An event's signal or wait instead (RW_EVENT_*, 0: not one), at its place among the rest:
+	 * -encodeSignalEvent:value: and -encodeWaitForEvent:value: of the command buffer. */
+	unsigned eventOp;
+	HKMetalEvent *event;
+	uint64_t eventValue;
 }
 @end
+
+enum { RW_EVENT_SIGNAL = 1, RW_EVENT_WAIT };
 
 enum {
 	RW_BLIT_BUFFER = 1, RW_BLIT_FILL, RW_BLIT_TEXTURE, RW_BLIT_BUFFER_TO_TEXTURE,
@@ -1123,7 +1133,23 @@ enum {
 - (instancetype)initWithHKCommandBuffer:(HKMetalCommandBuffer *)commandBuffer;
 @end
 
-@interface HKMetalTexture : _MTLResource {
+/*
+ * What a buffer and a texture share: whether a heap made them. Nothing here suballocates --
+ * every resource is its own allocation, a heap's one included -- so a heap is an account kept
+ * of its resources' sizes against its own (HKMetalHeap below), and "made by a heap" is this.
+ */
+@class HKMetalHeap;
+@interface HKMetalResource : _MTLResource {
+@protected
+	HKMetalHeap *_heap;       /* retained: Metal keeps a heap for as long as its resources */
+	NSUInteger _heapSize;     /* what it counts against the heap (0: a placement heap's) */
+	NSUInteger _heapOffset;
+	BOOL _aliasable;
+}
+- (void)hkPlaceInHeap:(HKMetalHeap *)heap size:(NSUInteger)size offset:(NSUInteger)offset;
+@end
+
+@interface HKMetalTexture : HKMetalResource {
 	HKMetalDevice *_owner;
 	struct rwa_texture *_texture;
 	struct rwa_texture_shape _shape;
@@ -1173,7 +1199,7 @@ enum {
 		index:(NSUInteger *)index;
 @end
 
-@interface HKMetalBuffer : _MTLResource {
+@interface HKMetalBuffer : HKMetalResource {
 	HKMetalDevice *_owner;
 	io_connect_t _gpu;        /* not owned: the device holds it */
 	uint32_t _handle;         /* set on the kernel path only */
@@ -1188,6 +1214,67 @@ enum {
 			   gpu:(io_connect_t)gpu
 			length:(NSUInteger)length;
 @end
+
+@interface HKMetalFence : _MTLObjectWithLabel
+- (instancetype)initWithHKDevice:(HKMetalDevice *)device;
+@end
+
+@interface HKMetalEvent : _MTLObjectWithLabel
+- (instancetype)initWithHKDevice:(HKMetalDevice *)device shared:(BOOL)shared;
+/* YES: not reached yet in the order of the GPU's work, and `buffer` is resumed when it is */
+- (BOOL)hkWait:(HKMetalCommandBuffer *)buffer value:(uint64_t)value;
+/* the value in the order of the GPU's work; returns the command buffers that may go on now */
+- (NSArray *)hkSignalOrdered:(uint64_t)value;
+/* the value as the processor sees it (signaledValue, listeners): once the work before it is done */
+- (void)hkSignalVisible:(uint64_t)value;
+@end
+
+@interface HKMetalHeap : _MTLObjectWithLabel
+- (instancetype)initWithHKDevice:(HKMetalDevice *)device descriptor:(MTLHeapDescriptor *)descriptor;
+- (void)hkGiveBack:(NSUInteger)size;
+@end
+
+/*
+ * What a heap counts for a resource (HKMetalHeap): a buffer's length and a texture's texels at
+ * the bytes their format takes, rounded up to the GPU's pages. A compressed format is counted
+ * at a byte a texel, the most any of them takes (ASTC 4x4).
+ */
+#define RW_HEAP_ALIGN           16384u
+
+static NSUInteger
+rw_heap_round(NSUInteger size)
+{
+	return (size + RW_HEAP_ALIGN - 1) & ~(NSUInteger)(RW_HEAP_ALIGN - 1);
+}
+
+static NSUInteger
+rw_format_bytes(NSUInteger format)
+{
+	if (format < 20) {
+		return 1;       /* A8, R8 */
+	} else if (format < 53) {
+		return 2;       /* R16, RG8, the packed 16-bit ones */
+	} else if (format < 103) {
+		return 4;       /* R32, RG16, RGBA8, BGRA8, the 10-bit ones */
+	} else if (format < 123) {
+		return 8;       /* RG32, RGBA16 */
+	} else if (format < 130) {
+		return 16;      /* RGBA32 */
+	} else if (format < 250) {
+		return 1;       /* block-compressed, 4:2:2 */
+	}
+	return format == 250 ? 2 : format == 253 ? 1 : format == 260 ? 8 : format >= 550 && format < 554 ? 8 : 4;
+}
+
+static NSUInteger
+rw_texture_bytes(MTLTextureDescriptor *d)
+{
+	NSUInteger layers = MAX([d arrayLength], 1) * ([d textureType] == 5 || [d textureType] == 6 ? 6 : 1);
+	NSUInteger bytes = MAX([d width], 1) * MAX([d height], 1) * MAX([d depth], 1) * layers *
+	    MAX([d sampleCount], 1) * rw_format_bytes([d pixelFormat]);
+
+	return [d mipmapLevelCount] > 1 ? bytes + bytes / 3 : bytes;       /* (a full chain is a third more) */
+}
 
 @implementation HKMetalDevice
 
@@ -2340,24 +2427,40 @@ enum {
 	return 16;   /* a placeholder: the real figure is per format and belongs to Mesa */
 }
 
-/* Heaps are suballocation of one big allocation, and nothing here suballocates yet. Metal's
- * contract allows nil and a zero size-and-align, so these decline rather than lie. */
-- (id)newHeapWithDescriptor:(id)descriptor { (void)descriptor; return nil; }
+/* Heaps: an account of sizes, not a suballocator (HKMetalHeap). The sizes these two answer
+ * are exactly what the heap counts, which is all Metal promises of them. */
+- (id)newHeapWithDescriptor:(id)descriptor
+{
+	return [[HKMetalHeap alloc] initWithHKDevice:self descriptor:descriptor];
+}
 - (MTLSizeAndAlign)heapBufferSizeAndAlignWithLength:(NSUInteger)length options:(NSUInteger)options
 {
-	(void)length; (void)options;
-	return (MTLSizeAndAlign){ 0, 0 };
+	(void)options;
+	return (MTLSizeAndAlign){ rw_heap_round(length), RW_HEAP_ALIGN };
 }
 - (MTLSizeAndAlign)heapTextureSizeAndAlignWithDescriptor:(id)descriptor
 {
-	(void)descriptor;
-	return (MTLSizeAndAlign){ 0, 0 };
+	return (MTLSizeAndAlign){ rw_heap_round(rw_texture_bytes(descriptor)), RW_HEAP_ALIGN };
 }
 
 /* Everything else the two protocols require and this driver has not built. Each returns the
  * API's own failure value, so a caller finds out by the rule Metal already has, rather than
  * by a selector that does not exist. */
-- (id)newFence                                      { return nil; }
+/* Fences order encoders of one queue on the GPU. Here every command buffer of the process runs
+ * through one Gallium context in commit order, and freedreno orders the hazards inside it, so a
+ * fence has nothing left to add: the object is real and its update and wait are the no-ops the
+ * encoders already answer. */
+- (id)newFence                                      { return [[HKMetalFence alloc] initWithHKDevice:self]; }
+- (id)newEvent                                      { return [[HKMetalEvent alloc] initWithHKDevice:self shared:NO]; }
+- (id)newSharedEvent                                { return [[HKMetalEvent alloc] initWithHKDevice:self shared:YES]; }
+/* an event of another process's: nothing here is shared between processes (see -newSharedTextureWithDescriptor:) */
+- (id)newSharedEventWithHandle:(id)handle
+{
+	(void)handle;
+	RW_ONCE("a shared event from another process was asked for; nothing of this driver's "
+		"crosses processes, so there is none\n");
+	return nil;
+}
 /*
  * The one method -[CAMetalLayer nextDrawable] asks of a device (docs/metal.md 10.46):
  * allocate_drawable_texture builds an ordinary MTLTextureDescriptor, sets its private
@@ -2737,10 +2840,6 @@ enum {
  * a path that then believes the resource was purged: see -addPurgedResource: on the command
  * buffer.) */
 - (NSUInteger)setPurgeableState:(NSUInteger)state { (void)state; return 2; }
-- (id)heap                      { return nil; }
-- (NSUInteger)heapOffset        { return 0; }
-- (BOOL)isAliasable             { return NO; }
-- (void)makeAliasable           { }
 
 /*
  * What <MTLResourceSPI> and <MTLBuffer> require and nothing in this chain answered: ten
@@ -2749,8 +2848,8 @@ enum {
  * protocol demands instead of what our own tests happen to send.
  *
  * Aliasing: nothing here aliases anything. Every buffer is its own GEM allocation (or its
- * own Mesa allocation), there are no heaps and -makeAliasable does nothing, so "does this
- * overlap that" is NO for every pair, for certain.
+ * own Mesa allocation), a heap's included (HKMetalHeap), and -makeAliasable only gives its
+ * size back to the heap's account, so "does this overlap that" is NO for every pair, for certain.
  *
  * Completion: this driver's -commit runs the recorded work and -waitUntilCompleted fences
  * it, and nothing hands a resource back to a caller before the submission it was part of
@@ -2901,10 +3000,6 @@ enum {
  * the compiler library's is held until it is destroyed, so there is no volatile state to
  * report and zero was not a state at all. */
 - (NSUInteger)setPurgeableState:(NSUInteger)state { (void)state; return 2; }
-- (id)heap                         { return nil; }
-- (NSUInteger)heapOffset           { return 0; }
-- (BOOL)isAliasable                { return NO; }
-- (void)makeAliasable              { }
 
 - (void)replaceRegion:(MTLRegion)region
 	  mipmapLevel:(NSUInteger)level
@@ -3363,6 +3458,7 @@ enum {
 	}
 	[blitFrom release];
 	[blitTo release];
+	[event release];
 	[super dealloc];
 }
 @end
@@ -3733,6 +3829,10 @@ hk_fence_queue(void)
 	NSMutableArray *_scheduled, *_completed;   /* handler blocks, copied to the heap */
 	struct rwa_fence *_fence;       /* this buffer's submission, from -commit; NULL before */
 	NSUInteger _protectionOptions;  /* what the window server asked for; see -setProtectionOptions: */
+	NSUInteger _next;               /* the work item -hkRun goes on from (an event's wait stops it) */
+	NSMutableArray *_signals;       /* event signals run, made visible once this buffer is complete */
+	NSCondition *_ran;              /* ... and whether all of it has run (-waitUntilCompleted waits for that) */
+	BOOL _hasRun;
 }
 
 /*
@@ -3795,6 +3895,8 @@ hk_fence_queue(void)
 		(unsigned)RW_CB_COMMITTED, (unsigned)RW_CB_SCHEDULED,
 		(unsigned)RW_CB_COMPLETED, (unsigned)RW_CB_ERROR);
 	_status = RW_CB_ENQUEUED;   /* nothing is pending yet */
+	_signals = [[NSMutableArray alloc] init];
+	_ran = [[NSCondition alloc] init];
 	_owesSlot = YES;
 	[queue hkTookSlot];
 	return self;
@@ -3829,6 +3931,8 @@ hk_fence_queue(void)
 		mesa.fence_release([[_queue device] mesaDevice], _fence);
 	}
 	[_work release];
+	[_signals release];
+	[_ran release];
 	[_error release];
 	[_scheduled release];
 	[_completed release];
@@ -3881,8 +3985,29 @@ hk_fence_queue(void)
 }
 - (id)resourceStateCommandEncoder { return nil; }
 - (id)accelerationStructureCommandEncoder { return nil; }
-- (void)encodeSignalEvent:(id)event value:(uint64_t)value { (void)event; (void)value; }
-- (void)encodeWaitForEvent:(id)event value:(uint64_t)value { (void)event; (void)value; }
+/*
+ * Events, at their place among the encoders. A signal takes effect for later waits when the
+ * buffer runs (the GPU's work is in order, so what follows it in the context runs after it) and
+ * for the processor -- signaledValue, listeners -- once the buffer is complete. A wait that is
+ * not reached stops this buffer there; the signal that reaches it runs the rest (-hkRun).
+ */
+- (void)hkEncodeEvent:(id)event value:(uint64_t)value op:(unsigned)op
+{
+	HKMetalWork *work;
+
+	if (![event isKindOfClass:[HKMetalEvent class]]) {
+		RW_ONCE("an event that is not this driver's was encoded; it is ignored\n");
+		return;
+	}
+	work = [[HKMetalWork alloc] init];
+	work->eventOp = op;
+	work->event = [event retain];
+	work->eventValue = value;
+	[self recordWork:work];
+	[work release];
+}
+- (void)encodeSignalEvent:(id)event value:(uint64_t)value { [self hkEncodeEvent:event value:value op:RW_EVENT_SIGNAL]; }
+- (void)encodeWaitForEvent:(id)event value:(uint64_t)value { [self hkEncodeEvent:event value:value op:RW_EVENT_WAIT]; }
 
 - (id)computeCommandEncoderWithDispatchType:(NSUInteger)type
 {
@@ -3902,13 +4027,52 @@ hk_fence_queue(void)
  * second thread still share the context unguarded -- take it there too if one shows up. */
 static pthread_mutex_t rw_pipe_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* An event's signal, run: the buffers it lets go on are added to `ready` (made if NULL). */
+static NSMutableArray *
+rw_signal(HKMetalWork *work, NSMutableArray *ready, NSMutableArray *signals)
+{
+	NSArray *now = [work->event hkSignalOrdered:work->eventValue];
+
+	[signals addObject:work];
+	if ([now count] == 0) {
+		return ready;
+	}
+	if (ready == nil) {
+		ready = [[NSMutableArray alloc] init];
+	}
+	[ready addObjectsFromArray:now];
+	return ready;
+}
+
 - (void)commit
 {
+	_status = RW_CB_COMMITTED;
+	[self hkRun];
+}
+
+- (void)hkRun
+{
 	char why[512] = { 0 };
+	NSMutableArray *ready = nil;
 
 	pthread_mutex_lock(&rw_pipe_lock);
-	_status = RW_CB_COMMITTED;
-	for (HKMetalWork *work in _work) {
+	for (; _next < [_work count]; _next++) {
+		HKMetalWork *work = [_work objectAtIndex:_next];
+
+		if (work->eventOp == RW_EVENT_WAIT) {
+			if ([work->event hkWait:self value:work->eventValue]) {
+				/* the event holds this buffer now; the signal that reaches it calls -hkRun */
+				_next++;
+				pthread_mutex_unlock(&rw_pipe_lock);
+				[self hkReturnSlot];
+				return;
+			}
+			continue;
+		}
+		if (work->eventOp == RW_EVENT_SIGNAL) {
+			ready = rw_signal(work, ready, _signals);
+			continue;
+		}
 		if (work->blit != 0) {
 			if (![self runBlit:work why:why size:sizeof(why)]) {
 				goto done;
@@ -3980,7 +4144,21 @@ static pthread_mutex_t rw_pipe_lock = PTHREAD_MUTEX_INITIALIZER;
 	}
 	_status = RW_CB_SCHEDULED;   /* submitted; the fence below is what makes it completed */
 done:
+	if (_status == RW_CB_ERROR) {
+		/* a failed buffer's signals are given all the same, or whoever waits for them waits for ever */
+		for (_next++; _next < [_work count]; _next++) {
+			HKMetalWork *work = [_work objectAtIndex:_next];
+
+			if (work->eventOp == RW_EVENT_SIGNAL) {
+				ready = rw_signal(work, ready, _signals);
+			}
+		}
+	}
 	pthread_mutex_unlock(&rw_pipe_lock);
+	[_ran lock];
+	_hasRun = YES;
+	[_ran broadcast];
+	[_ran unlock];
 	/* The queue's slot goes back here and on every way out of this method, a failed draw
 	 * included: a buffer that errored is as finished as one that drew, and a slot kept
 	 * because of an error would turn one bad draw into a queue that blocks for ever. */
@@ -3988,6 +4166,11 @@ done:
 	/* and only then the handlers, so that a handler which makes the next command buffer
 	 * is not waiting for a slot this one still holds */
 	[self hkDeliverHandlers];
+	/* and the buffers this one's signals let go on, after its own work is submitted */
+	for (HKMetalCommandBuffer *buffer in ready) {
+		[buffer hkRun];
+	}
+	[ready release];
 }
 
 /* A draw, built out of what the encoder recorded. Separate from the dispatch loop because the
@@ -4242,8 +4425,36 @@ done:
 }
 
 /* The fence is the whole point: a dispatch that the GPU does not finish must not read as a
- * result. air_run learned that the expensive way (docs/air.md section 5). */
+ * result. air_run learned that the expensive way (docs/air.md section 5). A buffer stopped at
+ * an event's wait is waited for until the rest of it has run; its signals become visible after. */
 - (void)waitUntilCompleted
+{
+	if (_status == RW_CB_COMMITTED) {
+		[_ran lock];
+		while (!_hasRun) {
+			[_ran wait];
+		}
+		[_ran unlock];
+	}
+	[self hkWaitFence];
+	[self hkSignalsDone];
+}
+
+- (void)hkSignalsDone
+{
+	NSMutableArray *signals;
+
+	@synchronized (self) {
+		signals = _signals;
+		_signals = nil;
+	}
+	for (HKMetalWork *work in signals) {
+		[work->event hkSignalVisible:work->eventValue];
+	}
+	[signals release];
+}
+
+- (void)hkWaitFence
 {
 	@synchronized (self) {
 		char why[512] = { 0 };
@@ -4386,6 +4597,7 @@ done:
 	}
 	[scheduled release];
 	[completed release];
+	[self hkSignalsDone];   /* (a failed buffer: there is no fence to wait for) */
 }
 
 /* -commitWithDeadline: is an abstract entry of _MTLCommandBuffer, so inheriting it aborts
@@ -6952,3 +7164,334 @@ ensure_function_encoder(void)
 	class_replaceMethod(fn, sel_getUid("newArgumentEncoderWithBufferIndex:reflection:"),
 			    (IMP)rw_function_argument_encoder_reflection, "@@:Q^@");
 }
+
+/* ---- heaps, fences, events -------------------------------------------------------------- */
+
+static void
+rw_conform(Class cls, const char *name)
+{
+	Protocol *p = objc_getProtocol(name);
+
+	if (p != NULL && !class_conformsToProtocol(cls, p) && !class_addProtocol(cls, p)) {
+		rw_print("class_addProtocol(%s) refused\n", name);
+	}
+}
+
+@implementation HKMetalResource
+- (id)heap               { return _heap; }
+- (NSUInteger)heapOffset { return _heapOffset; }
+- (BOOL)isAliasable      { return _aliasable; }
+/* Its size goes back to the heap's account at once, as Metal's does; its memory stays its own
+ * until it is released, because nothing here hands one allocation to two resources. */
+- (void)makeAliasable
+{
+	if (_heap != nil && !_aliasable) {
+		_aliasable = YES;
+		[_heap hkGiveBack:_heapSize];
+	}
+}
+- (void)hkPlaceInHeap:(HKMetalHeap *)heap size:(NSUInteger)size offset:(NSUInteger)offset
+{
+	_heap = [heap retain];
+	_heapSize = size;
+	_heapOffset = offset;
+}
+- (void)dealloc
+{
+	if (_heap != nil) {
+		if (!_aliasable) {
+			[_heap hkGiveBack:_heapSize];
+		}
+		[_heap release];
+	}
+	[super dealloc];
+}
+@end
+
+@implementation HKMetalFence {
+	HKMetalDevice *_owner;
+}
++ (void)load { rw_conform(self, "MTLFence"); }
+- (instancetype)initWithHKDevice:(HKMetalDevice *)device
+{
+	self = [super init];
+	_owner = device;
+	return self;
+}
+- (id)device { return _owner; }
+@end
+
+/*
+ * MTLEvent and MTLSharedEvent, one class. Two values: `ordered` is where the GPU's work has got
+ * in the order it is submitted -- what a command buffer's wait is judged by -- and `signaled` is
+ * what the processor may see, which a command buffer's signal reaches only once that buffer is
+ * complete. The processor's own -setSignaledValue: is both at once.
+ */
+@implementation HKMetalEvent {
+	HKMetalDevice *_owner;
+	BOOL _shared;
+	pthread_mutex_t _lock;
+	uint64_t _ordered, _signaled;
+	NSMutableArray *_waiting;       /* [command buffer, value] */
+	NSMutableArray *_listeners;     /* [value, block, queue] */
+}
++ (void)load
+{
+	rw_conform(self, "MTLEvent");
+	rw_conform(self, "MTLSharedEvent");
+}
+- (instancetype)initWithHKDevice:(HKMetalDevice *)device shared:(BOOL)shared
+{
+	self = [super init];
+	if (self == nil) {
+		return nil;
+	}
+	_owner = device;
+	_shared = shared;
+	pthread_mutex_init(&_lock, NULL);
+	_waiting = [[NSMutableArray alloc] init];
+	_listeners = [[NSMutableArray alloc] init];
+	return self;
+}
+- (void)dealloc
+{
+	[_waiting release];
+	[_listeners release];
+	pthread_mutex_destroy(&_lock);
+	[super dealloc];
+}
+- (id)device { return _owner; }
+
+- (BOOL)hkWait:(HKMetalCommandBuffer *)buffer value:(uint64_t)value
+{
+	BOOL wait;
+
+	pthread_mutex_lock(&_lock);
+	wait = _ordered < value;
+	if (wait) {
+		[_waiting addObject:@[ buffer, @(value) ]];
+	}
+	pthread_mutex_unlock(&_lock);
+	return wait;
+}
+
+- (NSArray *)hkSignalOrdered:(uint64_t)value
+{
+	NSMutableArray *ready = [NSMutableArray array];
+	NSMutableArray *still = [NSMutableArray array];
+
+	pthread_mutex_lock(&_lock);
+	if (value > _ordered) {
+		_ordered = value;
+	}
+	for (NSArray *w in _waiting) {
+		if ([[w objectAtIndex:1] unsignedLongLongValue] <= _ordered) {
+			[ready addObject:[w objectAtIndex:0]];
+		} else {
+			[still addObject:w];
+		}
+	}
+	[_waiting setArray:still];
+	pthread_mutex_unlock(&_lock);
+	return ready;
+}
+
+- (void)hkSignalVisible:(uint64_t)value
+{
+	NSMutableArray *fire = [NSMutableArray array];
+	NSMutableArray *still = [NSMutableArray array];
+	uint64_t now;
+
+	pthread_mutex_lock(&_lock);
+	if (value > _signaled) {
+		_signaled = value;
+	}
+	now = _signaled;
+	for (NSArray *l in _listeners) {
+		[([[l objectAtIndex:0] unsignedLongLongValue] <= now ? fire : still) addObject:l];
+	}
+	[_listeners setArray:still];
+	pthread_mutex_unlock(&_lock);
+	for (NSArray *l in fire) {
+		void (^block)(id, uint64_t) = [l objectAtIndex:1];
+
+		[self retain];
+		dispatch_async([l objectAtIndex:2], ^{
+			block(self, now);
+			[self release];
+		});
+	}
+}
+
+- (uint64_t)signaledValue
+{
+	uint64_t value;
+
+	pthread_mutex_lock(&_lock);
+	value = _signaled;
+	pthread_mutex_unlock(&_lock);
+	return value;
+}
+
+- (void)setSignaledValue:(uint64_t)value
+{
+	NSArray *ready = [self hkSignalOrdered:value];
+
+	[self hkSignalVisible:value];
+	for (HKMetalCommandBuffer *buffer in ready) {
+		[buffer hkRun];
+	}
+}
+
+- (void)notifyListener:(id)listener atValue:(uint64_t)value block:(void (^)(id, uint64_t))block
+{
+	dispatch_queue_t queue = [listener respondsToSelector:@selector(dispatchQueue)] ? [listener dispatchQueue] : nil;
+
+	if (block == NULL) {
+		return;
+	}
+	pthread_mutex_lock(&_lock);
+	[_listeners addObject:@[ @(value), [[block copy] autorelease],
+	    queue != nil ? queue : dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0) ]];
+	pthread_mutex_unlock(&_lock);
+	[self hkSignalVisible:0];       /* (one already reached fires at once) */
+}
+
+/* shortcut: looks once a millisecond; a condition variable if anything waits on this for long */
+- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds
+{
+	for (uint64_t waited = 0; [self signaledValue] < value; waited++) {
+		if (waited >= milliseconds) {
+			return NO;
+		}
+		usleep(1000);
+	}
+	return YES;
+}
+
+/* a handle is for another process (XPC); nothing of this driver's crosses processes */
+- (id)newSharedEventHandle
+{
+	RW_ONCE("a shared event's handle for another process was asked for; there is none\n");
+	return nil;
+}
+@end
+
+/*
+ * MTLHeap as an account: Metal's promise is that a heap's resources fit in its size, and that
+ * the sizes the device answers (-heapBufferSizeAndAlignWithLength:...) are what they take. Each
+ * resource is still its own allocation, which Metal allows -- aliasable resources may share
+ * memory, they need not -- and costs only the saving a real suballocator would make. A
+ * placement heap's resources go where the caller says and count nothing against it.
+ */
+@implementation HKMetalHeap {
+	HKMetalDevice *_owner;
+	pthread_mutex_t _lock;
+	NSUInteger _size, _used, _storageMode, _cpuCacheMode, _hazardTrackingMode, _type;
+}
++ (void)load { rw_conform(self, "MTLHeap"); }
+- (instancetype)initWithHKDevice:(HKMetalDevice *)device descriptor:(MTLHeapDescriptor *)descriptor
+{
+	self = [super init];
+	if (self == nil) {
+		return nil;
+	}
+	if ([descriptor size] == 0) {
+		[self release];
+		return nil;
+	}
+	_owner = device;
+	pthread_mutex_init(&_lock, NULL);
+	_size = rw_heap_round([descriptor size]);
+	_storageMode = [descriptor storageMode];
+	_cpuCacheMode = [descriptor cpuCacheMode];
+	_hazardTrackingMode = [descriptor hazardTrackingMode];
+	_type = [descriptor respondsToSelector:@selector(type)] ? (NSUInteger)[descriptor type] : 0;
+	return self;
+}
+- (void)dealloc
+{
+	pthread_mutex_destroy(&_lock);
+	[super dealloc];
+}
+- (id)device                     { return _owner; }
+- (NSUInteger)size               { return _size; }
+- (NSUInteger)currentAllocatedSize { return _size; }
+- (NSUInteger)storageMode        { return _storageMode; }
+- (NSUInteger)cpuCacheMode       { return _cpuCacheMode; }
+- (NSUInteger)hazardTrackingMode { return _hazardTrackingMode; }
+- (NSUInteger)resourceOptions    { return _cpuCacheMode | _storageMode << 4 | _hazardTrackingMode << 8; }
+- (NSInteger)type                { return (NSInteger)_type; }
+- (NSUInteger)setPurgeableState:(NSUInteger)state { (void)state; return 2; }   /* never volatile, as the resources */
+- (NSUInteger)usedSize
+{
+	NSUInteger used;
+
+	pthread_mutex_lock(&_lock);
+	used = _used;
+	pthread_mutex_unlock(&_lock);
+	return used;
+}
+- (NSUInteger)maxAvailableSizeWithAlignment:(NSUInteger)alignment
+{
+	NSUInteger left = _size - [self usedSize];
+
+	return alignment != 0 && (alignment & (alignment - 1)) == 0 ? left & ~(alignment - 1) : left;
+}
+- (BOOL)hkTake:(NSUInteger)size
+{
+	BOOL fits;
+
+	pthread_mutex_lock(&_lock);
+	fits = _used + size <= _size;
+	if (fits) {
+		_used += size;
+	}
+	pthread_mutex_unlock(&_lock);
+	return fits;
+}
+- (void)hkGiveBack:(NSUInteger)size
+{
+	pthread_mutex_lock(&_lock);
+	_used -= size <= _used ? size : _used;
+	pthread_mutex_unlock(&_lock);
+}
+/* `offset`: NSNotFound for an automatic heap's resource, else where a placement heap's goes */
+- (id)hkPlace:(HKMetalResource *)resource size:(NSUInteger)size offset:(NSUInteger)offset
+{
+	BOOL placed = offset != NSNotFound;
+
+	if (placed ? offset > _size || size > _size - offset : ![self hkTake:size]) {
+		[resource release];
+		return nil;
+	}
+	if (resource == nil) {
+		if (!placed) {
+			[self hkGiveBack:size];
+		}
+		return nil;
+	}
+	[resource hkPlaceInHeap:self size:placed ? 0 : size offset:placed ? offset : 0];
+	return resource;
+}
+- (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options
+{
+	return [self hkPlace:[_owner newBufferWithLength:length options:options] size:rw_heap_round(length)
+		      offset:NSNotFound];
+}
+- (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options offset:(NSUInteger)offset
+{
+	return [self hkPlace:[_owner newBufferWithLength:length options:options] size:rw_heap_round(length)
+		      offset:offset];
+}
+- (id)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor
+{
+	return [self hkPlace:[_owner newTextureWithDescriptor:descriptor]
+			size:rw_heap_round(rw_texture_bytes(descriptor)) offset:NSNotFound];
+}
+- (id)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset
+{
+	return [self hkPlace:[_owner newTextureWithDescriptor:descriptor]
+			size:rw_heap_round(rw_texture_bytes(descriptor)) offset:offset];
+}
+@end

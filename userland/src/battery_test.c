@@ -9,6 +9,8 @@
  *   battery_test open URL   have SpringBoard open a URL, such as prefs:root=BATTERY_USAGE (Settings >
  *                           Battery): for screenshots of a page that is hard to reach by touches alone
  *                           (needs the entitlement in battery_test.entitlements, which build.sh signs in)
+ *   battery_test launch ID  have SpringBoard start an application by its bundle identifier, such as
+ *                           com.apple.weather (for one without a URL of its own; the same entitlement file)
  *   battery_test powerlog   what iOS's power log (aggregated, CurrentPowerlog.PLSQL) has collected: every
  *                           table with rows, how many and over what time; one row of each of the accounting
  *                           tables Settings > Battery reads (the energy per application comes from them)
@@ -240,11 +242,34 @@ powerlog(void)
 	return 0;
 }
 
+/* SpringBoardServices' way of starting an application, as a program with the entitlement may */
+static int
+launch(const char *identifier)
+{
+	void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+	int (*start)(CFStringRef, Boolean) = sbs ? (int (*)(CFStringRef, Boolean))dlsym(sbs, "SBSLaunchApplicationWithIdentifier") : NULL;
+	CFStringRef name = CFStringCreateWithCString(NULL, identifier, kCFStringEncodingUTF8);
+	int result;
+
+	if (start == NULL || name == NULL) {
+		printf("battery_test: cannot launch %s: no SBSLaunchApplicationWithIdentifier\n", identifier);
+		return 1;
+	}
+	result = start(name, false);
+	printf("battery_test: SpringBoard was asked to launch %s: %s (%d)\n", identifier, result == 0 ? "it does" : "it REFUSES",
+	    result);
+	CFRelease(name);
+	return result != 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	if (argc > 2 && strcmp(argv[1], "open") == 0) {
 		return open_url(argv[2]);
+	}
+	if (argc > 2 && strcmp(argv[1], "launch") == 0) {
+		return launch(argv[2]);
 	}
 	if (argc > 1 && strcmp(argv[1], "powerlog") == 0) {
 		return powerlog();
