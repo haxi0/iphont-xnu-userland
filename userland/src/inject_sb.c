@@ -1071,6 +1071,126 @@ load_tweaks(void)
 	}
 }
 
+/*
+ * Boot-arg ca_fps=N (by default the panel's rate where it is above 60: the OnePlus 8's 90; ca_fps=0: off):
+ * SpringBoard's animations at up to N frames a second. For this identity (the iPhone X) the screen says 60, and an animation asks for
+ * no more unless it is given a range and a reason, as on a ProMotion iPhone (UIKit's scrolling and
+ * navigation do; CAHighFPS by PoomSmart lifts the same cap for applications' display links). So the
+ * screen says N, and every animation and display link asks for 30 to N, with a reason.
+ */
+typedef struct {
+	float minimum, maximum, preferred;
+} ca_range;
+
+static float ca_fps;
+static IMP ca_animation_init, ca_animation_range, ca_link_range, ca_link_fps, ca_screen_fps;
+
+static ca_range
+ca_lifted(void)
+{
+	return (ca_range){ 30, ca_fps, ca_fps };
+}
+
+static long
+ca_maximum_fps(__unused id self, __unused SEL selector)
+{
+	return (long)ca_fps;
+}
+
+static void
+ca_set_animation_range(id self, SEL selector, __unused ca_range range)
+{
+	((void (*)(id, SEL, ca_range))ca_animation_range)(self, selector, ca_lifted());
+}
+
+static id
+ca_init_animation(id self, SEL selector)
+{
+	SEL reason = sel_registerName("setHighFrameRateReason:");
+
+	self = ((id (*)(id, SEL))ca_animation_init)(self, selector);
+	if (self != nil) {
+		((void (*)(id, SEL, ca_range))ca_animation_range)(self, sel_registerName("setPreferredFrameRateRange:"), ca_lifted());
+		if (class_getInstanceMethod(object_getClass(self), reason) != NULL) {
+			((void (*)(id, SEL, uint32_t))objc_msgSend)(self, reason, 0x10001);
+		}
+	}
+	return self;
+}
+
+static void
+ca_set_link_range(id self, SEL selector, __unused ca_range range)
+{
+	((void (*)(id, SEL, ca_range))ca_link_range)(self, selector, ca_lifted());
+}
+
+static void
+ca_set_link_fps(id self, SEL selector, __unused long fps)
+{
+	((void (*)(id, SEL, long))ca_link_fps)(self, selector, 0);         /* 0: as fast as the display */
+}
+
+/*
+ * The method of that class replaced; one it only inherits gets an override of its own (CAAnimation has no
+ * -init: replacing what it finds would have replaced NSObject's, for every object of the process).
+ */
+static IMP
+ca_hook(const char *class_name, const char *selector, IMP replacement)
+{
+	Class cls = objc_getClass(class_name);
+	SEL sel = sel_registerName(selector);
+	Method method = cls == NULL ? NULL : class_getInstanceMethod(cls, sel);
+	Class parent = cls == NULL ? NULL : class_getSuperclass(cls);
+
+	if (method == NULL) {
+		return NULL;
+	}
+	if (parent != NULL && class_getInstanceMethod(parent, sel) == method) {
+		return class_addMethod(cls, sel, replacement, method_getTypeEncoding(method)) ? method_getImplementation(method) : NULL;
+	}
+	return method_setImplementation(method, replacement);
+}
+
+static void
+ca_fps_start(void)
+{
+	char args[1024] = "";
+	size_t size = sizeof(args) - 1;
+	const char *arg;
+
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
+		return;
+	}
+	/* by default the panel's rate where it is faster than 60: the OnePlus 8's 90 unless fb_hz= or fb_push=0 */
+	if ((arg = strstr(args, "ca_fps=")) != NULL && (arg == args || arg[-1] == ' ')) {
+		ca_fps = (float)atoi(arg + 7);
+	} else if ((arg = strstr(args, "fb_hz=")) != NULL) {
+		ca_fps = (float)atoi(arg + 6);
+	} else if (strstr(args, "board=instantnoodle") != NULL && strstr(args, "fb_push=0") == NULL) {
+		ca_fps = 90;
+	}
+	if (ca_fps <= 60 || ca_fps > 240) {
+		ca_fps = 0;
+		return;
+	}
+	ca_screen_fps = ca_hook("UIScreen", "maximumFramesPerSecond", (IMP)ca_maximum_fps);
+	ca_hook("CADisplay", "maximumFramesPerSecond", (IMP)ca_maximum_fps);
+	ca_animation_range = ca_hook("CAAnimation", "setPreferredFrameRateRange:", (IMP)ca_set_animation_range);
+	ca_animation_init = ca_animation_range ? ca_hook("CAAnimation", "init", (IMP)ca_init_animation) : NULL;
+	ca_link_range = ca_hook("CADisplayLink", "setPreferredFrameRateRange:", (IMP)ca_set_link_range);
+	ca_link_fps = ca_hook("CADisplayLink", "setPreferredFramesPerSecond:", (IMP)ca_set_link_fps);
+	say("redwood: ca_fps=%d: animations %s, display links %s\n", (int)ca_fps,
+	    ca_animation_init ? "lifted" : "NOT lifted", ca_link_range ? "lifted" : "NOT lifted");
+	/* what the screen itself would have said, once UIKit is up */
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+		Class cls = objc_getClass("UIScreen");
+		id screen = cls ? ((id (*)(Class, SEL))objc_msgSend)(cls, sel_registerName("mainScreen")) : nil;
+
+		say("redwood: ca_fps=%d: UIScreen's own maximumFramesPerSecond: %ld\n", (int)ca_fps, screen && ca_screen_fps ?
+		    ((long (*)(id, SEL))ca_screen_fps)(screen, sel_registerName("maximumFramesPerSecond")) : -1);
+	});
+}
+
 __attribute__((constructor))
 static void
 redwood_springboard_init(void)
@@ -1105,6 +1225,7 @@ redwood_springboard_init(void)
 	 * this one opens it, the way a jailbreak's own hook does.
 	 */
 	load_tweaks();
+	ca_fps_start();
 	/*
 	 * Everything the Metal driver says, it says with printf, and SpringBoard's standard output
 	 * goes nowhere -- so inside this process every refusal our driver prints has been invisible.

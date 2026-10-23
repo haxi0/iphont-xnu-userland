@@ -3,6 +3,7 @@
 # The driver with one submission and one fence per command buffer (rwa_device_defer_waits)
 # instead of a fence per draw: the blits, the whole fragment corpus, and the timings of
 # rc.jobs.metalperf, so a regression in any of the three shows in one boot.
+/redwood/bin/metal_drv_test --completion
 /redwood/bin/metal_drv_test --blit
 /redwood/bin/metal_drv_test --draw-all 0 300 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
 /redwood/bin/metal_drv_test --time 32 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib

@@ -7512,6 +7512,79 @@ sweep_every_class(void)
 	}
 }
 
+/* Check completion without an explicit wait, plus handlers registered around commit. */
+static int
+completion_test(id<MTLDevice> dev)
+{
+	id<MTLCommandQueue> queue = [dev newCommandQueue];
+	if (queue == nil) {
+		return 1;
+	}
+	MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+										    width:1080 height:2400 mipmapped:NO];
+	desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	id<MTLTexture> texture = [dev newTextureWithDescriptor:desc];
+	if (texture == nil) {
+		[queue release];
+		return 1;
+	}
+	int failures = 0;
+	for (unsigned mode = 0; mode < 3; mode++) {
+		id<MTLCommandBuffer> cmd = [queue commandBuffer];
+		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.colorAttachments[0].texture = texture;
+		pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		pass.colorAttachments[0].clearColor = MTLClearColorMake(0.5, 0.25, 0.75, 1);
+		id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
+		if (cmd == nil || enc == nil) {
+			failures++;
+			break;
+		}
+		[enc endEncoding];
+		dispatch_semaphore_t done = dispatch_semaphore_create(0);
+		__block NSUInteger observed = 0;
+		void (^handler)(id<MTLCommandBuffer>) = ^(id<MTLCommandBuffer> completed) {
+			observed = completed.status;
+			dispatch_semaphore_signal(done);
+		};
+		if (mode == 1) {
+			[cmd addCompletedHandler:handler];
+		}
+		[cmd commit];
+		if (mode == 2) {
+			[cmd addCompletedHandler:handler];
+		}
+		bool timed_out = false;
+		if (mode == 0) {
+			for (unsigned i = 0; i < 5000 && cmd.status < MTLCommandBufferStatusCompleted; i++) {
+				usleep(1000);
+			}
+			observed = cmd.status;
+		} else {
+			timed_out = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0;
+		}
+		bool ok = !timed_out && observed == MTLCommandBufferStatusCompleted;
+		if (ok) {
+			uint8_t pixel[4] = { 0 };
+			[texture getBytes:pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+			ok = abs((int)pixel[0] - 191) <= 1 && abs((int)pixel[1] - 64) <= 1 &&
+			    abs((int)pixel[2] - 128) <= 1 && pixel[3] == 255;
+		}
+		printf("drvtest: completion: %s: status %lu timeout %u: %s\n",
+		    mode == 0 ? "no handler" : mode == 1 ? "before commit" : "after commit",
+		    (unsigned long)observed, timed_out, ok ? "PASS" : "FAIL");
+		failures += !ok;
+		/* A timed-out callback may still arrive; keep its semaphore until process exit. */
+		if (!timed_out) {
+			dispatch_release(done);
+		}
+	}
+	[texture release];
+	[queue release];
+	return failures != 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7534,6 +7607,7 @@ main(int argc, char **argv)
 	bool picture = false;
 	int picture_seconds = 60;
 	bool timing = false;
+	bool completion_only = false;
 	unsigned timing_repeats = 32;
 	int next = 1;
 
@@ -7564,6 +7638,10 @@ main(int argc, char **argv)
 	}
 	if (argc > next && strcmp(argv[next], "--blit") == 0) {
 		blit_only = true;
+		next++;
+	}
+	if (argc > next && strcmp(argv[next], "--completion") == 0) {
+		completion_only = true;
 		next++;
 	}
 	if (argc > next && strcmp(argv[next], "--draw") == 0) {
@@ -7828,6 +7906,9 @@ have_device:
 	printf("drvtest: it calls itself \"%s\"\n", [[sys name] UTF8String]);
 	if (blit_only) {
 		return blit_test(sys);
+	}
+	if (completion_only) {
+		return completion_test(sys);
 	}
 
 	/* What the device still owes, counted by the runtime on the device rather than guessed

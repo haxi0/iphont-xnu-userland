@@ -3712,11 +3712,23 @@ enum {
 	RW_CB_ERROR        = 5,
 };
 
+static dispatch_queue_t
+redwood_fence_queue(void)
+{
+	static dispatch_queue_t queue;
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		queue = dispatch_queue_create("redwood.metal.completion", DISPATCH_QUEUE_SERIAL);
+	});
+	return queue;
+}
+
 @implementation RedwoodMetalCommandBuffer {
 	RedwoodMetalCommandQueue *_queue;
 	NSMutableArray *_work;
 	NSError *_error;
-	NSUInteger _status;
+	_Atomic(NSUInteger) _status;
 	BOOL _owesSlot;                 /* this buffer holds one of the queue's slots */
 	NSMutableArray *_scheduled, *_completed;   /* handler blocks, copied to the heap */
 	struct rwa_fence *_fence;       /* this buffer's submission, from -commit; NULL before */
@@ -4233,30 +4245,32 @@ done:
  * result. air_run learned that the expensive way (docs/air.md section 5). */
 - (void)waitUntilCompleted
 {
-	char why[512] = { 0 };
+	@synchronized (self) {
+		char why[512] = { 0 };
 
-	if (_status == RW_CB_ERROR || _status == RW_CB_COMPLETED) {
-		return;
-	}
-	struct rwa_device *device = [[_queue device] mesaDevice];
-	int rc;
+		if (_status == RW_CB_ERROR || _status == RW_CB_COMPLETED) {
+			return;
+		}
+		struct rwa_device *device = [[_queue device] mesaDevice];
+		int rc;
 
-	if (_fence != NULL) {
-		rc = mesa.fence_wait(device, _fence, why, sizeof(why));
-	} else {
-		pthread_mutex_lock(&rw_pipe_lock);
-		rc = mesa.finish(device, why, sizeof(why));
-		pthread_mutex_unlock(&rw_pipe_lock);
+		if (_fence != NULL) {
+			rc = mesa.fence_wait(device, _fence, why, sizeof(why));
+		} else {
+			pthread_mutex_lock(&rw_pipe_lock);
+			rc = mesa.finish(device, why, sizeof(why));
+			pthread_mutex_unlock(&rw_pipe_lock);
+		}
+		if (rc != 0) {
+			rw_print("THE GPU DID NOT FINISH: %s\n", why);
+			_error = [[NSError errorWithDomain:@"RedwoodMetal" code:3
+						  userInfo:@{ NSLocalizedDescriptionKey:
+							      [NSString stringWithUTF8String:why] }] retain];
+			_status = RW_CB_ERROR;
+			return;
+		}
+		_status = RW_CB_COMPLETED;   /* the fence has been paid, and only now */
 	}
-	if (rc != 0) {
-		rw_print("THE GPU DID NOT FINISH: %s\n", why);
-		_error = [[NSError errorWithDomain:@"RedwoodMetal" code:3
-					  userInfo:@{ NSLocalizedDescriptionKey:
-						      [NSString stringWithUTF8String:why] }] retain];
-		_status = RW_CB_ERROR;
-		return;
-	}
-	_status = RW_CB_COMPLETED;   /* the fence has been paid, and only now */
 }
 
 - (void)waitUntilScheduled { }
@@ -4273,11 +4287,9 @@ done:
  *
  * So handlers are kept and delivered where the work happens: -commit. A scheduled handler
  * is delivered as soon as the recorded work has been submitted, a completed handler after
- * the GPU fence has been paid for -- the fence is only taken when somebody is actually
- * waiting on one, because this driver's -commit is otherwise asynchronous and a fence
- * nobody asked for would cost every frame. A handler added after the fact is delivered at
- * once rather than dropped: Metal calls that undefined, and losing it would be the kind of
- * silence this driver is trying to stop having.
+ * the GPU fence has been paid for. A background waiter advances status and keeps the recorded
+ * resources alive even when nobody registered a handler. A handler added after commit waits
+ * for that same fence; scheduled is not completed.
  */
 - (void)redwoodDeliver:(void (^)(id))handler
 {
@@ -4311,11 +4323,21 @@ done:
 
 - (void)addCompletedHandler:(void (^)(id))handler
 {
+	NSUInteger status = _status;
+
 	if (handler == NULL) {
 		return;
 	}
-	if (_status >= RW_CB_SCHEDULED) {
+	if (status >= RW_CB_COMPLETED) {
 		[self redwoodDeliver:handler];
+		return;
+	}
+	if (status == RW_CB_SCHEDULED) {
+		/* A handler registered after commit still owes the same GPU fence. */
+		dispatch_async(redwood_fence_queue(), ^{
+			[self waitUntilCompleted];
+			[self redwoodDeliver:handler];
+		});
 		return;
 	}
 	if (_completed == nil) {
@@ -4336,18 +4358,13 @@ done:
 	for (id handler in scheduled) {
 		[self redwoodDeliver:(void (^)(id))handler];
 	}
-	if ([completed count] > 0 && _fence != NULL) {
+	if (_status == RW_CB_SCHEDULED) {
 		/* The fence is waited for off the committing thread, so that a renderer goes on
 		 * encoding the next frame while the GPU draws this one. One serial queue: fences
 		 * of one ring complete in order, so waiting in order costs nothing. */
-		static dispatch_queue_t waiter;
-		static dispatch_once_t once;
-
-		dispatch_once(&once, ^{
-			waiter = dispatch_queue_create("redwood.metal.completion", DISPATCH_QUEUE_SERIAL);
-		});
+		/* Even without handlers, keep recorded resources alive and advance status. */
 		[self retain];
-		dispatch_async(waiter, ^{
+		dispatch_async(redwood_fence_queue(), ^{
 			[self waitUntilCompleted];
 			for (id handler in completed) {
 				[self redwoodDeliver:(void (^)(id))handler];

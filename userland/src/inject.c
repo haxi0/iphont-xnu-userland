@@ -38,6 +38,7 @@
 #include <objc/runtime.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1203,6 +1204,92 @@ opengl_es(void)
 	gl_function_refused = (void (*)(unsigned))dlsym(library, "redwood_gl_function_refused");
 }
 
+/*
+ * Boot-arg ca_rates=1 (finding where the window server's 60 frames a second comes from): 20 s after the
+ * start, every method of CoreAnimation's display classes whose name speaks of a rate, refresh, frame or
+ * fps is listed, and those that take nothing and answer a number are asked.
+ */
+static void
+rates_of(const char *what, id object, Class cls)
+{
+	unsigned count = 0;
+	Method *methods = class_copyMethodList(cls, &count);
+
+	for (unsigned i = 0; i < count; i++) {
+		const char *name = sel_getName(method_getName(methods[i]));
+		char type = 0;
+
+		if (strcasestr(name, "rate") == NULL && strcasestr(name, "refresh") == NULL && strcasestr(name, "frame") == NULL &&
+		    strcasestr(name, "fps") == NULL && strcasestr(name, "vbl") == NULL && strcasestr(name, "vsync") == NULL) {
+			continue;
+		}
+		method_getReturnType(methods[i], &type, 1);
+		if (object == nil || method_getNumberOfArguments(methods[i]) != 2 || strchr("dfqQiIlLcB", type) == NULL) {
+			say("redwood: ca_rates: %s %s (%s)\n", what, name, method_getTypeEncoding(methods[i]));
+			continue;
+		}
+		SEL sel = method_getName(methods[i]);
+		if (type == 'd') {
+			say("redwood: ca_rates: %s %s = %g\n", what, name, ((double (*)(id, SEL))objc_msgSend)(object, sel));
+		} else if (type == 'f') {
+			say("redwood: ca_rates: %s %s = %g\n", what, name, (double)((float (*)(id, SEL))objc_msgSend)(object, sel));
+		} else {
+			say("redwood: ca_rates: %s %s = %lld\n", what, name, (long long)((long (*)(id, SEL))objc_msgSend)(object, sel));
+		}
+	}
+	free(methods);
+}
+
+static void
+ca_rates(void)
+{
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+		Class display = objc_getClass("CADisplay"), server = objc_getClass("CAWindowServer");
+		Class server_display = objc_getClass("CAWindowServerDisplay"), mode = objc_getClass("CADisplayMode");
+		id main = display ? ((id (*)(Class, SEL))objc_msgSend)(display, sel_registerName("mainDisplay")) : nil;
+		id ws = server ? ((id (*)(Class, SEL))objc_msgSend)(server, sel_registerName("serverIfRunning")) : nil;
+		id displays = ws ? ((id (*)(id, SEL))objc_msgSend)(ws, sel_registerName("displays")) : nil;
+		id first = displays ? ((id (*)(id, SEL))objc_msgSend)(displays, sel_registerName("firstObject")) : nil;
+		id current = main ? ((id (*)(id, SEL))objc_msgSend)(main, sel_registerName("currentMode")) : nil;
+
+		if (display) rates_of("CADisplay", main, display);
+		if (mode) rates_of("CADisplayMode", current, mode);
+		if (server_display) rates_of("CAWindowServerDisplay", first, server_display);
+		if (server) rates_of("CAWindowServer", ws, server);
+	});
+}
+
+/*
+ * Boot-arg ca_fps=N (by default the panel's rate where it is above 60; ca_fps=0: off): the window server's
+ * own idea of the display's rate. It takes the preferred mode's (60, an iPhone X) as its ideal rate and paces every
+ * animation and VBL delta by it (ca_rates=1 showed idealRefreshRate 60, vblDelta 16.7 ms); told not to,
+ * and given N, it can go to N. Done as soon as its display exists.
+ */
+static void
+ca_ideal_rate(float fps, unsigned tries)
+{
+	Class server = objc_getClass("CAWindowServer");
+	id ws = server ? ((id (*)(Class, SEL))objc_msgSend)(server, sel_registerName("serverIfRunning")) : nil;
+	id displays = ws ? ((id (*)(id, SEL))objc_msgSend)(ws, sel_registerName("displays")) : nil;
+	id display = displays ? ((id (*)(id, SEL))objc_msgSend)(displays, sel_registerName("firstObject")) : nil;
+
+	if (display == nil) {
+		if (tries < 300) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+				ca_ideal_rate(fps, tries + 1);
+			});
+		} else {
+			say("redwood: ca_fps: the window server never had a display\n");
+		}
+		return;
+	}
+	((void (*)(id, SEL, BOOL))objc_msgSend)(display, sel_registerName("setUsesPreferredModeRefreshRate:"), NO);
+	((void (*)(id, SEL, float))objc_msgSend)(display, sel_registerName("setIdealRefreshRate:"), fps);
+	say("redwood: ca_fps=%d: the window server's display: ideal rate %g, VBL delta %llu (after %u tries)\n", (int)fps,
+	    (double)((float (*)(id, SEL))objc_msgSend)(display, sel_registerName("idealRefreshRate")),
+	    (unsigned long long)((unsigned long (*)(id, SEL))objc_msgSend)(display, sel_registerName("vblDelta")), tries);
+}
+
 __attribute__((constructor))
 static void
 redwood_init(void)
@@ -1226,7 +1313,16 @@ redwood_init(void)
 		 * (CADeviceUseVBL()); on the iPhone X it runs a timer of its own instead (CADisplayTimer),
 		 * whose phase it would set from the frame timings of a display driver this one is not.
 		 */
-		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && strstr(arguments, "ca_vbl=1") != NULL) {
+		/*
+		 * On by itself where the panel runs faster than the iPhone X's 60 Hz: the OnePlus 8 at 90 unless fb_hz=
+		 * or fb_push=0 says otherwise (the kernel's MiniIOMobileFramebuffer); ca_vbl=0 keeps CoreAnimation's timer.
+		 */
+		const char *hz = NULL;
+		bool faster = sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 &&
+		    ((hz = strstr(arguments, "fb_hz=")) != NULL ? atoi(hz + 6) > 60 :
+		    strstr(arguments, "board=instantnoodle") != NULL && strstr(arguments, "fb_push=0") == NULL);
+
+		if ((faster && strstr(arguments, "ca_vbl=0") == NULL) || strstr(arguments, "ca_vbl=1") != NULL) {
 			setenv("CA_FORCE_TIMER", "1", 1);
 			say("redwood: ca_vbl=1: CoreAnimation is to take the display driver's refresh notifications\n");
 		}
@@ -1249,6 +1345,19 @@ redwood_init(void)
 				setenv(setting, equals + 1, 1);
 				say("redwood: caenv: %s=%s for the window server\n", setting, equals + 1);
 			}
+		}
+		if (strstr(arguments, "ca_rates=1") != NULL) {
+			ca_rates();
+		}
+		const char *fps = strstr(arguments, "ca_fps=");
+		int wanted = fps != NULL && (fps == arguments || fps[-1] == ' ') ? atoi(fps + 7) :
+		    hz != NULL ? atoi(hz + 6) : faster ? 90 : 0;  /* (as SpringBoard's: inject_sb.c ca_fps_start()) */
+		if (wanted > 60 && wanted <= 240) {
+			float rate = (float)wanted;
+
+			dispatch_async(dispatch_get_main_queue(), ^{
+				ca_ideal_rate(rate, 0);
+			});
 		}
 		opengl_es();
 		window_server_fixes();

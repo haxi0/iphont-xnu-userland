@@ -16,6 +16,13 @@
 # a draw costs 41 us before any pixel, and SHOWING a finished frame costs 15.46 ms.
 # them to a frame rate, is docs/metal.md 10.43.
 #
+# SINCE 2026-10-23 THE DEFAULT IS NOT WHAT THIS LIST MEASURED. The driver now defers waits
+# (rwa_device_defer_waits): -commit records and submits once, and -waitUntilCompleted carries the
+# GPU's time. Everything below -- the paragraph that follows and every bracket -- describes the
+# fence per draw, which boot-arg metal_sync=1 brings back. Boot with it to use this list as the
+# regression check it was written as; without it, expect -commit far under the brackets and
+# -waitUntilCompleted far over "~0" (docs/air.md section 9.3 has both sets of numbers).
+#
 # WHERE THE TIME GOES HERE, BECAUSE IT IS NOT WHERE AN APPLICATION EXPECTS IT.
 # -[RedwoodMetalCommandBuffer commit] does the work (docs/metal.md 10.13): the encoder only
 # records, and -commit walks the recorded list calling rwa_render_draw, each of which flushes

@@ -8,6 +8,8 @@ The other two thirds are **not** here and are not started: the `_MTLDevice`/`IOG
 object graph (AGXMetalA11 alone is 53 classes and 1158 methods, IOGPU.framework 711 more), and the
 kernel ABI that submits work. Where a decision below constrains them it says so, and section 7
 collects those constraints in one list.
+(Written before those two thirds existed. The driver is now `userland/src/redwoodmetal.m` over
+the kernel's `RedwoodGPU`; section 9 has where it stands on the second phone.)
 
 Why this is worth doing at all, and what it costs, is argued in `docs/metal.md` section 9. This
 document assumes those measurements and records the decisions taken on top of them.
@@ -4988,3 +4990,103 @@ file (a narrow type, and `ffma` through TGSI's `MAD`). Whether the Adreno agrees
 question and this file cannot answer it. Two things would make the meter honest and neither is
 this change: `collect_declarations` should fail loudly on a library it could not read, and the
 `tail -6` should be wide enough to show the line that says how much of the suite was judged.
+
+## 9. The second GPU: the Adreno 650, and a fence per command buffer
+
+Everything above was measured on redwood's Adreno 642L ("Adreno 7c+ Gen 3", chip `0x06030500`).
+The OnePlus 8 (`instantnoodle`, Snapdragon 865) has an Adreno 650, chip `0x06050002`, which Mesa
+calls `FD650`. The frontend, the library and the driver run on it unchanged except for what this
+section lists. Logs are `logs/<HHMMSS>-run.log` of the boots named, all RAM-only.
+
+### 9.1 What the corpus does on it
+
+- **Fragment shaders** (`RC_JOBS=rc.jobs.metaldefer`, log `012340`): of AppleMetalGLRenderer's 271,
+  **263 drew**, 0 were refused at the draw, 2 got no pipeline, and 6 could not be given the textures
+  they declare. `tools/air/metalcheck.py --log logs/012340-run.log` compares them with softpipe:
+  **258 agree, 0 differ**, 13 could not be compared. That is the same count as on redwood, and the
+  same as on this phone before 9.3 changed how the work is waited for.
+- **Compute kernels** (`rc.jobs.metalall`, log `002426`): 33 compiled and dispatched. The GPU
+  finished 15; the driver refused the other 18 before the GPU saw them, because the harness's
+  textures did not match what the kernels declare. Of the 15, 4 agree with softpipe, 1 wrote
+  nothing on either side, 9 have no host reference (softpipe refuses them), and **1 differs**:
+  `MetalFaceMask_MinMax` (buffer 2: softpipe `00000000 00000000 ffffc51a 0000b81f`, the Adreno
+  `00000000 00000000 ffffbf20 0000c570`). Its texel coordinates come from the `bounds`, `region`
+  and `quad` buffers plus two loops, and the harness fills those buffers with zeros. So the likely
+  reading is texel fetches outside the 4x4 texture, which Metal leaves undefined and the two
+  backends answer differently. That is not proven: nobody has yet run it with bounds that keep
+  every fetch inside the texture.
+- **Blits and passes** (`metal_drv_test --blit`): copies, fills, buffer to texture and back with
+  padded rows, texture copies, mipmaps, a pass that clears and draws nothing, two draws in one
+  cleared pass (the clear happens once), and a 4-sample clear and draw, each resolved. All pass.
+  The resolve needed two things the host could not show, because softpipe has no multisampling:
+  `nr_storage_samples` set to the sample count, without which freedreno's format check (and so
+  `util_blitter`'s) refuses the resolve without a word and the result reads as zeros; and a
+  multisample render target that may also be sampled, since the resolve reads it through a
+  sampler. CoreAnimation makes its 4-sample layer render-target only, and SpringBoard's resolve was
+  refused for exactly that (log `013208`) until `rwa_texture_create` added the binding.
+
+### 9.2 The A650 bring-up, as far as Metal sees it
+
+The kernel side is `redwood_adreno.c`'s `kona` variant and is not this document's subject.
+One thing from it matters here: a GPU that has hung once stays hung for the rest of the boot (the
+same as on redwood, section 5), so a wedged run says nothing about the runs after it.
+
+### 9.3 A fence per command buffer, not per draw
+
+Until 2026-10-23 every `rwa_render_draw` and `rwa_dispatch_buffers` flushed the context and waited
+for its own fence (`finish_or_say_why`, required). That is right for `air_run`, which reads the
+mapped buffers the moment the call returns. For a driver it means the encoding thread and the GPU
+take turns on every draw.
+
+- **The library.** `rwa_device_defer_waits(device, 1)` makes those calls record only;
+  `rwa_flush` submits what was recorded and returns a fence; `rwa_fence_wait` waits on it, on any
+  thread, with no context; and `rwa_fence_release` drops the fence. `air_run` never asks for any
+  of this and still waits per call.
+- **The driver.** `-commit` runs the recorded work under one lock, then submits it once and keeps
+  the fence. `-waitUntilCompleted` waits on that fence. Completed handlers run after it on a private
+  serial queue (`redwood.metal.completion`), so a renderer goes on encoding the next frame
+  meanwhile. The boot-arg `metal_sync=1` brings the per-draw wait back: it is slower, but a GPU
+  failure then names the draw that caused it.
+- **Correctness.** A draw's surfaces were freed with `surface_destroy` straight after the draw,
+  which was safe only because the draw had already been waited for. A batch that has not been
+  waited for still holds them, so they are now released with `pipe_surface_reference`. The clear
+  path had already crashed on the same mistake (SIGSEGV in `rwa_finish`). A recorded work item also
+  retains its buffers, textures, samplers and pipeline: a `-setVertexBytes:` buffer is
+  autoreleased, and Metal's own command buffers retain what they reference.
+
+A command buffer also keeps itself and what it recorded alive until its fence has signalled, whether
+or not anyone registered a completed handler; its status moves to completed on its own, and a handler
+added after `-commit` still runs after the fence. On the phone (log `033721`, `rc.jobs.metaldefer`)
+`metal_drv_test --completion` passes for a handler before `-commit`, after it and none at all (status 4,
+no timeout), the blits are all ok and the corpus draws 263 of 271 as before.
+
+The same images, booted once with `metal_sync=1` (log `012837`) and once without (log `012340`),
+`metal_drv_test --time 32`, medians:
+
+| `-commit`, the time the encoding thread is blocked | fence per draw | fence per command buffer |
+| --- | --- | --- |
+| 1 draw, 4x4 | 75 us | 34 us |
+| 8 draws in one command buffer, 4x4 | 453 us | 89 us |
+| 8 draws in one command buffer, 1080x648 (4 targets) | 2 770 us | 119 us |
+| 8 draws in one command buffer, 1080x2400 | 7 086 us | 107 us |
+| 1 draw, 1080x2400 | 834 us | 37 us |
+
+The GPU's own time did not shrink; it moved. In the second column `-waitUntilCompleted` after a
+one-draw `-commit` costs 524 us at 1080x648 and 971 us at 1080x2400, where it cost 27 and 30 us
+before. What changed is that the processor no longer waits for it between draws, and the 8 draws
+go to the kernel in one flush instead of eight.
+
+### 9.4 The whole system on it
+
+With `metal=2 metal_profile=1` the Metal driver is the system's (log `013657`). SpringBoard,
+chronod, backboardd and mediaserverd load it. The home screen is drawn completely (wallpaper,
+icons, dock, status bar; screenshot at 170 s) and nothing crashed. backboardd itself still composites
+through OpenGL ES: the device is taken out of the window server ("RedwoodMetalDevice taken out of the
+window server"), so its `MTLCreateSystemDefaultDevice()` answers nil. chronod still has 2 pipelines
+refused for "a call passing a pointer at a computed offset", a frontend limit. Its earlier refusal,
+a read-only `device` buffer bound at an offset the GPU cannot fetch from (`mask__vertex`), is gone:
+the library now copies such a buffer into an aligned temporary one when it binds it.
+
+Not done: heaps, fences and events are still stubs. Uploads and reads from a second thread
+(`-replaceRegion:`, `-getBytes:`) do not take the lock that `-commit` takes. No third-party Metal
+application has been run on this phone.
