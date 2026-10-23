@@ -207,6 +207,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
 			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
 		$DYN -o obj/cpu_test src/cpu_test.c
+		# whether one program's GPU commands reach another's memory (src/gpu_iso_test.c; gpu_pt)
+		$DYN -framework IOKit -o obj/gpu_iso_test src/gpu_iso_test.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework IOSurface -o obj/cg_test src/cg_test.c
 		# what iOS here believes about Metal, and what CoreImage does without it (src/metal_test.m);
@@ -387,6 +389,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
+	[ -f obj/gpu_iso_test ] && cp obj/gpu_iso_test root/bin/
 	[ -f obj/camera_test ] && cp obj/camera_test root/bin/
 	[ -f obj/camera_avtest ] && cp obj/camera_avtest root/bin/
 	[ -f obj/record_test ] && cp obj/record_test root/bin/

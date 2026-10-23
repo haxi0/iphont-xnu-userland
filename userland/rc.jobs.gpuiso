@@ -1,0 +1,9 @@
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.gpuiso, with gpu=1).
+# Whether the GPU keeps programs apart (boot-arg gpu_pt, the default on the OnePlus 8): two
+# clients of HKGPU, each with page tables of its own; every check is a command of the 3D core's
+# and has a control that must work (src/gpu_iso_test.c says which). The second run ends with a
+# write to a register the kernel keeps for itself, which stops the core and is reset
+# (gpu_recover): the kernel's "adreno: gpu:" lines say what the core reported.
+/hackios/bin/gpu_iso_test
+/hackios/bin/gpu_iso_test protect
+/hackios/bin/gpu_iso_test
