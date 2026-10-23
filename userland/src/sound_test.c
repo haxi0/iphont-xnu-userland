@@ -24,6 +24,15 @@
  *                                      three taps of falling strength
  *   restart                            kill the audio server (launchd starts it again when it is next asked for):
  *                                      what every program then sees as "media services were reset"
+ *   alert TYPE [SECONDS]               an alert the way iOS plays one (ToneLibrary's TLAlert: what SpringBoard
+ *                                      plays for a call or a message, what Settings plays as a preview): the tone
+ *                                      chosen for TYPE in Settings (1 an incoming call's ringtone, 2 a text
+ *                                      message's), through the ringer's switch and volume; stopped after SECONDS
+ *                                      (default 4: a ringtone goes on until it is stopped). No call is needed.
+ *   notification BUNDLE [TITLE]        a local notification of the application BUNDLE, delivered now with its
+ *                                      default sound (UNUserNotificationCenter; usernotificationsd lets this
+ *                                      program post for BUNDLE by src/sound_test.entitlements); then what
+ *                                      Notification Center holds of BUNDLE's
  *
  * The samples come out of /dev/hk-audio (see sys/hk_audio.h); a tone is something one
  * can recognize there without ears: two peaks in the spectrum, where they were put.
@@ -351,6 +360,108 @@ haptic(double seconds)
 	return 0;
 }
 
+static id
+string(const char *utf8)
+{
+	return (id)CFAutorelease(CFStringCreateWithCString(NULL, utf8, kCFStringEncodingUTF8));
+}
+
+static id
+framework_class(const char *path, const char *name)
+{
+	if (objc_getClass(name) == NULL) {
+		dlopen(path, RTLD_NOW);
+	}
+	return (id)objc_getClass(name);
+}
+
+static int
+alert(long type, double seconds)
+{
+	id manager = send(framework_class("/System/Library/PrivateFrameworks/ToneLibrary.framework/ToneLibrary", "TLToneManager"),
+	    "sharedToneManager");
+	id tone = manager ? ((id (*)(id, SEL, long))objc_msgSend)(manager, sel_registerName("currentToneIdentifierForAlertType:"),
+	    type) : NULL;
+	id path = tone ? ((id (*)(id, SEL, id))objc_msgSend)(manager, sel_registerName("filePathForToneIdentifier:"), tone) : NULL;
+	id configuration, played;
+
+	if (manager == NULL || objc_getClass("TLAlertConfiguration") == NULL || objc_getClass("TLAlert") == NULL) {
+		printf("sound_test: alert: no ToneLibrary\n");
+		return 1;
+	}
+	printf("sound_test: alert of type %ld: the tone chosen is %s (%s)\n", type, text(tone), text(path));
+	configuration = ((id (*)(id, SEL, long))objc_msgSend)(send((id)objc_getClass("TLAlertConfiguration"), "alloc"),
+	    sel_registerName("initWithType:"), type);
+	played = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("TLAlert"), sel_registerName("alertWithConfiguration:"),
+	    configuration);
+	if (played == NULL) {
+		printf("sound_test: alert of type %ld: ToneLibrary makes no alert of it\n", type);
+		return 1;
+	}
+	((void (*)(id, SEL, id))objc_msgSend)(played, sel_registerName("playWithCompletionHandler:"), NULL);
+	printf("sound_test: alert of type %ld: playing for %.1f s\n", type, seconds);
+	usleep((useconds_t)(seconds * 1e6));
+	send(played, "stop");
+	printf("sound_test: alert of type %ld: stopped\n", type);
+	return 0;
+}
+
+static int
+notification(const char *bundle, const char *title)
+{
+	id center, content, request;
+	__block int answered = 0;
+	char identifier[64];
+
+	center = framework_class("/System/Library/Frameworks/UserNotifications.framework/UserNotifications", "UNUserNotificationCenter");
+	if (center == NULL) {
+		printf("sound_test: notification: no UserNotifications\n");
+		return 1;
+	}
+	center = ((id (*)(id, SEL, id))objc_msgSend)(send(center, "alloc"), sel_registerName("initWithBundleIdentifier:"),
+	    string(bundle));
+	content = send(send((id)objc_getClass("UNMutableNotificationContent"), "alloc"), "init");
+	((void (*)(id, SEL, id))objc_msgSend)(content, sel_registerName("setTitle:"), string(title));
+	((void (*)(id, SEL, id))objc_msgSend)(content, sel_registerName("setBody:"), string("sound_test: a local notification"));
+	((void (*)(id, SEL, id))objc_msgSend)(content, sel_registerName("setSound:"),
+	    send((id)objc_getClass("UNNotificationSound"), "defaultSound"));
+	snprintf(identifier, sizeof(identifier), "sound_test.%llu", mach_absolute_time());
+	request = ((id (*)(id, SEL, id, id, id))objc_msgSend)((id)objc_getClass("UNNotificationRequest"),
+	    sel_registerName("requestWithIdentifier:content:trigger:"), string(identifier), content, NULL);
+	printf("sound_test: notification %s for %s: \"%s\", with the default sound\n", identifier, bundle, title);
+	((void (*)(id, SEL, id, void (^)(id)))objc_msgSend)(center, sel_registerName("addNotificationRequest:withCompletionHandler:"),
+	    request, ^(id error) {
+		printf("sound_test: notification: %s%s\n", error ? "REFUSED: " : "taken by usernotificationsd",
+		    error ? text(send(error, "description")) : "");
+		answered = error ? 2 : 1;
+	});
+	for (int tenths = 0; answered == 0 && tenths < 100; tenths++) {
+		usleep(100000);
+	}
+	if (answered != 1) {
+		printf("sound_test: notification: %s\n", answered ? "refused" : "no answer in 10 s");
+		return 1;
+	}
+	sleep(3);
+	answered = 0;
+	((void (*)(id, SEL, void (^)(id)))objc_msgSend)(center, sel_registerName("getDeliveredNotificationsWithCompletionHandler:"),
+	    ^(id delivered) {
+		unsigned long count = delivered ? ((unsigned long (*)(id, SEL))objc_msgSend)(delivered, sel_registerName("count")) : 0;
+
+		printf("sound_test: notification: Notification Center holds %lu of %s's\n", count, bundle);
+		for (unsigned long n = 0; n < count; n++) {
+			id one = ((id (*)(id, SEL, unsigned long))objc_msgSend)(delivered, sel_registerName("objectAtIndex:"), n);
+
+			printf("sound_test: notification:   %s\n", text(send(send(one, "request"), "identifier")));
+		}
+		answered = 1;
+	});
+	for (int tenths = 0; answered == 0 && tenths < 100; tenths++) {
+		usleep(100000);
+	}
+	return answered != 1;
+}
+
 extern int proc_listallpids(void *buffer, int size);
 extern int proc_name(int pid, void *buffer, uint32_t size);
 
@@ -400,6 +511,15 @@ main(int argc, char **argv)
 			failed |= tone(seconds);
 		} else if (strcmp(argv[i], "raw") == 0 && i + 1 < argc) {
 			failed |= raw(atof(argv[++i]));
+		} else if (strcmp(argv[i], "alert") == 0 && i + 1 < argc) {
+			long type = atol(argv[++i]);
+			double seconds = i + 1 < argc && atof(argv[i + 1]) > 0 ? atof(argv[++i]) : 4;
+
+			failed |= alert(type, seconds > 30 ? 30 : seconds);
+		} else if (strcmp(argv[i], "notification") == 0 && i + 1 < argc) {
+			const char *bundle = argv[++i], *title = i + 1 < argc && strcmp(argv[i + 1], "wait") != 0 ? argv[++i] : "HackiOS";
+
+			failed |= notification(bundle, title);
 		} else if (strcmp(argv[i], "level") == 0 && i + 1 < argc) {
 			peak = atof(argv[++i]);
 			peak = peak < 0 ? 0 : peak > 1 ? 1 : peak;

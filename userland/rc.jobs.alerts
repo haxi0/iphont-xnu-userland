@@ -1,0 +1,6 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
+# iOS's own alerts, for a recording (rec_sound=N, ./xl sound) and a screenshot: an incoming call's ringtone
+# and a text message's tone as ToneLibrary plays them (no call: the alert itself), a local notification of
+# Clock's with its default sound (banner / Lock Screen), and the system sounds once more.
+/hackios/bin/sound_test springboard route wait 3 alert 1 4 wait 3 alert 2 3 wait 3 notification com.apple.mobiletimer HackiOS wait 6 system 1100 wait 3
+/bin/ps -A

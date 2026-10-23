@@ -197,7 +197,10 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -o obj/rwtouch src/rwtouch.c
 		# the kernel's thermal pressure passed on to iOS (src/thermald.c)
 		$DYN -o obj/thermald src/thermald.c
-		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c
+		# (signed, if ldid is there: usernotificationsd takes notifications for an application only by an entitlement)
+		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c &&
+			{ ${LDID:-ldid} -Ssrc/sound_test.entitlements obj/sound_test 2>/dev/null ||
+			  echo "build.sh: no ldid: sound_test is unsigned, and usernotificationsd will not take its notifications"; }
 		$DYN -framework CoreFoundation -lMobileGestalt -o obj/mg_test src/mg_test.c
 		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/torch_test src/torch_test.c
 		$DYN -O2 -o obj/camera_test src/camera_test.c src/camera_isp.c
@@ -684,10 +687,12 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 		mkdir -p flashboot/fw
 		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] flashboot/fw/
 	fi
-	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
-		mkdir -p flashboot/fw
-		cp ../fw-audio/aw882xx_acf.bin flashboot/fw/
-	fi
+	for amps in aw882xx_acf.bin tfa98xx.cnt; do         # (redwood's, the OnePlus 8's)
+		if [ -f ../fw-audio/$amps ]; then
+			mkdir -p flashboot/fw
+			cp ../fw-audio/$amps flashboot/fw/
+		fi
+	done
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
 	# /private/preboot/jb once the iOS volume is the root -- the volume where a rootless jailbreak keeps its
 	# Procursus on an iPhone as well; init grafts it onto /var/jb (src/init.c, mount_writable)
@@ -755,11 +760,14 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
 	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/hk_speaker.c,
-	# for sound=3): Android's own register values, which are not in the repository either
-	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
-		mkdir -p sysroot/fw
-		cp ../fw-audio/aw882xx_acf.bin sysroot/fw/
-	fi
+	# for sound=3), the OnePlus 8's /vendor/firmware/tfa98xx.cnt (bsd/dev/instantnoodle_speaker.c): Android's own
+	# register values, which are not in the repository either
+	for amps in aw882xx_acf.bin tfa98xx.cnt; do
+		if [ -f ../fw-audio/$amps ]; then
+			mkdir -p sysroot/fw
+			cp ../fw-audio/$amps sysroot/fw/
+		fi
+	done
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: the Procursus bootstrap with
 	# Sileo in it, as /jb. It cannot live at /var/jb in the image -- /private/var is a memory
 	# filesystem made afresh at every boot -- so init copies it there (src/init.c, copy_tree).

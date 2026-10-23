@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- sound_test notification BUNDLE: usernotificationsd takes notifications for these applications from it -->
+	<key>com.apple.private.usernotifications.bundle-identifiers</key>
+	<array>
+		<string>com.apple.mobiletimer</string>
+		<string>com.apple.reminders</string>
+	</array>
+</dict>
+</plist>
