@@ -11,6 +11,8 @@
  *   visible    a buffer's signal reaches signaledValue and a listener once it is complete
  *   heap       sizes the device answers are what the heap counts; a buffer that does not fit is
  *              refused; given back on release and on makeAliasable; a heap buffer works in a blit
+ *   resolve    a 4-sample pass cleared and resolved into a texture made for ShaderRead|ShaderWrite
+ *              only, as Maps does: the resolved texel must be the clear colour
  *
  * Prints one line per check, "PASS" or "FAIL", and exits 1 if any failed.
  */
@@ -165,6 +167,37 @@ main(void)
 			t = nil;
 		}
 		check("heap", [heap usedSize] == 0, "released resources gave their sizes back");
+
+		/* resolve */
+		MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+		    width:64 height:64 mipmapped:NO];
+		md.textureType = MTLTextureType2DMultisample;
+		md.sampleCount = 4;
+		md.usage = MTLTextureUsageRenderTarget;
+		md.storageMode = MTLStorageModePrivate;
+		id<MTLTexture> ms = [device newTextureWithDescriptor:md];
+		MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+		    width:64 height:64 mipmapped:NO];
+		rd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+		id<MTLTexture> resolved = [device newTextureWithDescriptor:rd];
+		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		uint8_t texel[4] = { 0 };
+
+		pass.colorAttachments[0].texture = ms;
+		pass.colorAttachments[0].resolveTexture = resolved;
+		pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+		pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+		pass.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.5, 0.0, 1.0);
+		cb = [queue commandBuffer];
+		[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+		[cb commit];
+		[cb waitUntilCompleted];
+		[resolved getBytes:texel bytesPerRow:256 fromRegion:MTLRegionMake2D(10, 10, 1, 1) mipmapLevel:0];
+		printf("metal_sync_test: (resolved texel b g r a: %u %u %u %u; %s)\n", texel[0], texel[1], texel[2], texel[3],
+		    [cb error] ? [[[cb error] localizedDescription] UTF8String] : "no error");
+		check("resolve", ms != nil && resolved != nil && [cb error] == nil && texel[0] == 0 && texel[2] == 255 &&
+		    texel[1] >= 127 && texel[1] <= 128 && texel[3] == 255,
+		    "a resolve into a texture made without rendering, as Maps makes them");
 
 		printf("metal_sync_test: %s\n", failures ? "FAILED" : "all passed");
 	}

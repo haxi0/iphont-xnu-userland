@@ -104,6 +104,10 @@ export PATH=$B/venv/bin:$PATH
 	-Dlmsensors=disabled -Dbuild-tests=true -Dzstd=disabled -Dxmlconfig=disabled \
 	-Dexpat=disabled > meson-setup.log
 
+# ir3's disk cache asserts a GNU build-id note, which some linkers (NixOS's) do not add unasked:
+# without it every ir3 stage of tools/air/check.sh fails on the assertion and says nothing of the shader
+meson configure build -Dc_link_args=-Wl,--build-id=sha1 -Dcpp_link_args=-Wl,--build-id=sha1 > /dev/null
+
 ninja -C build src/compiler/air/air2nir \
 	src/gallium/drivers/freedreno/ir3_compiler \
 	src/gallium/drivers/freedreno/air_run \

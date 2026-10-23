@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.maps, with gpu=1 metal=2 systrace=1):
+# Maps alone, for the crash trace systrace=1 prints (osfmk/arm64/user_exception_trace.c).
+/hackios/bin/metal_sync_test
+/hackios/bin/rwtouch wait 20 swipe 0.5 0.985 0.5 0.3 250 wait 4
+/hackios/bin/battery_test launch com.apple.Maps
+/hackios/bin/rwtouch wait 25
+/bin/ps -A

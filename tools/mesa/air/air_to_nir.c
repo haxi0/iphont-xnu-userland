@@ -1641,7 +1641,10 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
    /* resources */
    if (md_key(node, "air.buffer") >= 0) {
       uint64_t as = 0, index = 0, size = 0;
-      md_key_int(node, "air.address_space", &as);
+      /* VectorKit's libraries (iOS 16.5) leave the key out: then the argument's own pointer
+       * type says it (`ptr addrspace(2) %2` for a constant buffer) */
+      if (!md_key_int(node, "air.address_space", &as))
+         as = t->addrspace;
       md_key_int(node, "air.location_index", &index);
       md_key_int(node, "air.buffer_size", &size);
       bool read = md_key(node, "air.read") >= 0 || md_key(node, "air.read_write") >= 0;

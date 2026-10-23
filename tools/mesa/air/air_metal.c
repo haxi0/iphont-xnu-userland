@@ -2002,10 +2002,13 @@ rwa_resolve_texture(struct rwa_texture *src, struct rwa_texture *dst, char *why,
           rwa_device_name(src->device), dst->format_name);
       return -1;
    }
-   if (!(src->res->bind & PIPE_BIND_SAMPLER_VIEW) || !(dst->res->bind & PIPE_BIND_RENDER_TARGET)) {
-      say(why, why_size, "a resolve from a %s texture made without sampling (bind %#x) into one "
-                         "made without rendering (bind %#x)", src->format_name, src->res->bind,
-          dst->res->bind);
+   /* The destination's own bindings are not asked: a blit writes a resource through a surface
+    * of its format, which the question above has answered, whatever it was made for -- and Maps
+    * resolves into textures made with ShaderRead|ShaderWrite alone (bind 0x8008), which Apple's
+    * driver takes. The source is read through a sampler by util_blitter, so it must be one. */
+   if (!(src->res->bind & PIPE_BIND_SAMPLER_VIEW)) {
+      say(why, why_size, "a resolve from a %s texture made without sampling (bind %#x)",
+          src->format_name, src->res->bind);
       return -1;
    }
    memset(&blit, 0, sizeof(blit));
@@ -7237,10 +7240,13 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
 
    pipe->bind_blend_state(pipe, render->blend);
    /* The caller's depth/stencil state, or the pipeline's zeroed one, which is Metal's
-    * behaviour with no MTLDepthStencilState set: no test and no write.
+    * behaviour with no MTLDepthStencilState set: no test and no write. A pass without a
+    * depth attachment gets the zeroed one too: Metal tests against nothing there, and
+    * freedreno, given a depth test and no zsbuf, reads through the missing surface
+    * (batch_draw_tracking_for_dirty_bits) -- which is how Maps died on its first frame.
     */
-   pipe->bind_depth_stencil_alpha_state(pipe, draw->depth_stencil ? draw->depth_stencil->cso
-                                                                  : render->dsa);
+   pipe->bind_depth_stencil_alpha_state(pipe, draw->depth_stencil && draw->depth
+                                                 ? draw->depth_stencil->cso : render->dsa);
    /* Metal keeps the reference value on the encoder and not in the state object, so it
     * is set per draw. Gallium's is one byte per face, which is the stencil buffer's
     * width; Metal's is a uint32 and only those bits can match anything.
