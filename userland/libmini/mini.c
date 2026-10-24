@@ -293,6 +293,18 @@ reboot(int howto)
 	return (int)SC(SYS_reboot, howto, 0, 0, 0, 0, 0);
 }
 
+int
+sigprocmask(int how, const uint32_t *mask, uint32_t *old)
+{
+	return (int)SC(SYS_sigprocmask, how, mask, old, 0, 0, 0);
+}
+
+int
+sigpending(uint32_t *pending)
+{
+	return (int)SC(SYS_sigpending, pending, 0, 0, 0, 0, 0);
+}
+
 size_t
 strlen(const char *s)
 {

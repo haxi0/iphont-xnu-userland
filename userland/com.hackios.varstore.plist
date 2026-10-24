@@ -15,6 +15,10 @@
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<!-- when iOS restarts or shuts down launchd sends SIGTERM and kills after this many seconds: the save
+	     it starts takes seconds, a hundred-odd megabytes through the loader -->
+	<key>ExitTimeOut</key>
+	<integer>90</integer>
 	<key>StandardOutPath</key>
 	<string>/dev/console</string>
 	<key>StandardErrorPath</key>

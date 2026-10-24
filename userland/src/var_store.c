@@ -13,8 +13,9 @@
  *
  *   var_store save          pack /private/var into the store
  *   var_store load          unpack the newest good store into /private/var (init, at boot)
- *   var_store watch [SECS]  stay and save by itself: when the kernel says the run is ending, and
- *                           every SECS seconds besides (a launchd job of ours does this)
+ *   var_store watch [SECS]  stay and save by itself: when the kernel says the run is ending, when launchd
+ *                           ends it (SIGTERM: iOS restarts or shuts down), and every SECS seconds besides
+ *                           (default: boot-arg var_save_every=, else never) -- a launchd job of ours does this
  *   var_store show          what the store holds, both slots
  *   var_store erase         forget both slots (the next boot starts empty again)
  *   var_store stamp PATH    write a line into PATH saying when: a marker for a run
@@ -121,30 +122,39 @@ struct entry {
 #define VAR_SAVE_WANTED 2
 #define VAR_SAVE_DONE   3
 
-/* Is NAME=VALUE among the kernel's arguments? (as init.c reads them) */
-static int
-boot_arg_is(const char *name, const char *value)
+/* The value of NAME= among the kernel's arguments (up to the next space), or NULL (as init.c reads them) */
+static const char *
+boot_arg(const char *name)
 {
 	static char args[1024];
-	size_t len = sizeof(args) - 1, n = strlen(name), v = strlen(value);
+	size_t len = sizeof(args) - 1, n = strlen(name);
 
 	if (sysctlbyname("kern.bootargs", args, &len, NULL, 0) != 0) {
-		return 0;
+		return NULL;
 	}
 	args[len < sizeof(args) ? len : sizeof(args) - 1] = 0;
 	for (char *p = args; *p;) {
 		while (*p == ' ') {
 			p++;
 		}
-		if (strncmp(p, name, n) == 0 && p[n] == '=' && strncmp(p + n + 1, value, v) == 0 &&
-		    (p[n + 1 + v] == 0 || p[n + 1 + v] == ' ')) {
-			return 1;
+		if (strncmp(p, name, n) == 0 && p[n] == '=') {
+			return p + n + 1;
 		}
 		while (*p && *p != ' ') {
 			p++;
 		}
 	}
-	return 0;
+	return NULL;
+}
+
+/* Is NAME=VALUE among the kernel's arguments? */
+static int
+boot_arg_is(const char *name, const char *value)
+{
+	const char *p = boot_arg(name);
+	size_t v = strlen(value);
+
+	return p != NULL && strncmp(p, value, v) == 0 && (p[v] == 0 || p[v] == ' ');
 }
 
 static long
@@ -1339,6 +1349,14 @@ watch(int seconds)
 {
 	uint64_t last = 0;
 	int asked = 0;
+	const uint32_t term = 1u << (SIGTERM - 1);
+
+	/*
+	 * An installed phone's run has no end the kernel could announce: iOS is restarted or shut down, and
+	 * launchd sends every job SIGTERM before the reboot call. Blocked, it waits here until the loop below
+	 * sees it pending and saves (com.hackios.varstore.plist gives the save its ExitTimeOut).
+	 */
+	(void)sigprocmask(SIG_BLOCK, &term, NULL);
 
 	fd = open(DEVICE, O_RDWR, 0);
 	if (fd < 0) {
@@ -1370,8 +1388,14 @@ watch(int seconds)
 			(void)bootok();
 		}
 
+		uint32_t pending = 0;
+
 		if (sysctl_int("kern.hackios.var_save", &state) == 0 && state == VAR_SAVE_WANTED) {
 			asked = 1;
+		}
+		if (sigpending(&pending) == 0 && (pending & term)) {
+			printf("var_store: the system is going down: the data volume is saved\n");
+			asked = 2;
 		}
 		gettimeofday(&tv, NULL);
 		if (asked || (seconds > 0 && (uint64_t)tv.tv_sec - last >= (uint64_t)seconds)) {
@@ -1383,7 +1407,9 @@ watch(int seconds)
 			last = (uint64_t)tv.tv_sec;
 			if (asked) {
 				/* answered either way: the kernel is waiting on this to go back to the loader */
-				(void)sysctl_set_int("kern.hackios.var_save", VAR_SAVE_DONE);
+				if (asked == 1) {
+					(void)sysctl_set_int("kern.hackios.var_save", VAR_SAVE_DONE);
+				}
 				return ok;
 			}
 		}
@@ -1463,7 +1489,11 @@ main(int argc, char **argv, char **envp)
 			printf("var_store: not asked to keep the data volume (var_store=1): nothing to watch\n");
 			return 0;
 		}
-		return watch(argc > 2 ? (int)parse_number(argv[2]) : 0) ? 0 : 1;
+		/* seconds between saves: the job's argument, else var_save_every= (an installed phone's, which
+		 * may be reset by its keys with no warning: what is lost is what changed since the last save) */
+		const char *every = boot_arg("var_save_every");
+
+		return watch(argc > 2 ? (int)parse_number(argv[2]) : every != NULL ? (int)parse_number(every) : 0) ? 0 : 1;
 	}
 	fd = open(DEVICE, strcmp(what, "load") == 0 || strcmp(what, "show") == 0 ? O_RDONLY : O_RDWR, 0);
 	if (fd < 0) {

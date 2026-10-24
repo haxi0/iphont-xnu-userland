@@ -21,7 +21,8 @@ extern char **environ;
 enum {
 	SYS_exit = 1, SYS_read = 3, SYS_write = 4, SYS_open = 5, SYS_close = 6, SYS_wait4 = 7, SYS_link = 9,
 	SYS_unlink = 10, SYS_chdir = 12, SYS_chmod = 15, SYS_chown = 16, SYS_getpid = 20, SYS_getuid = 24,
-	SYS_chflags = 34, SYS_kill = 37, SYS_getppid = 39, SYS_dup = 41, SYS_ioctl = 54, SYS_reboot = 55,
+	SYS_chflags = 34, SYS_kill = 37, SYS_getppid = 39, SYS_dup = 41, SYS_sigprocmask = 48, SYS_sigpending = 52,
+	SYS_ioctl = 54, SYS_reboot = 55,
 	SYS_symlink = 57, SYS_readlink = 58, SYS_execve = 59, SYS_msync = 65, SYS_munmap = 73, SYS_dup2 = 90,
 	SYS_select = 93, SYS_fsync = 95, SYS_socket = 97, SYS_bind = 104, SYS_gettimeofday = 116,
 	SYS_rename = 128, SYS_mkdir = 136, SYS_rmdir = 137, SYS_utimes = 138, SYS_pread = 153, SYS_pwrite = 154,
@@ -148,6 +149,11 @@ int     gettimeofday(struct timeval *tv, void *tz);
 int     usleep(unsigned microseconds);
 int     sysctlbyname(const char *name, void *oldp, size_t *oldlenp, const void *newp, size_t newlen);
 int     reboot(int howto);
+/* signals as a mask of bits (bit n-1: signal n), blocked and polled: no handlers, no trampoline */
+#define SIGTERM         15
+#define SIG_BLOCK       1
+int     sigprocmask(int how, const uint32_t *mask, uint32_t *old);
+int     sigpending(uint32_t *pending);
 int     mount(const char *type, const char *dir, int flags, void *data);
 int     mkdir(const char *path, int mode);
 int     rmdir(const char *path);
