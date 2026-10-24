@@ -1,0 +1,9 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
+# The microphone for iOS, silently (RC_JOBS=rc.jobs.micquiet, with adsp=1 mic=4): rc.jobs.mic without the speakers'
+# check and without the vibration motor -- nothing is played. Two recordings the way an application makes them
+# (record_test: AVAudioRecorder through the built-in microphone, from the kernel's /dev/hk-mic), six seconds and
+# four, with a pause between (see rc.jobs.mic).
+/hackios/bin/sound_test springboard
+/hackios/bin/record_test 6
+/hackios/bin/rwtouch wait 3
+/hackios/bin/record_test 4
