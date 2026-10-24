@@ -1,0 +1,3 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist): none on an installed phone.
+# rc.jobs runs diagnostics (cpu_test 240 keeps every core busy for four minutes) -- right for a run from the
+# computer, not for every boot of a phone in daily use (common/devices/<device>.conf, FLASH_USERLAND_VARS).
