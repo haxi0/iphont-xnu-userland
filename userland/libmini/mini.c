@@ -294,6 +294,12 @@ reboot(int howto)
 }
 
 int
+ioctl(int fd, unsigned long request, void *arg)
+{
+	return (int)SC(SYS_ioctl, fd, request, arg, 0, 0, 0);
+}
+
+int
 sigprocmask(int how, const uint32_t *mask, uint32_t *old)
 {
 	return (int)SC(SYS_sigprocmask, how, mask, old, 0, 0, 0);

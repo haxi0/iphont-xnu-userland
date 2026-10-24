@@ -168,6 +168,13 @@ cp obj/child root/bin/child
 # ends: the program and its job together, away from the iOS job list below, which several working
 # copies are editing at once.
 [ -f obj/var_store ] && cp obj/var_store root/bin/
+# Apple's newfs_hfs, for the data volume on the flash (var_data=hfs: src/init.c makes it there once):
+# ../tools/mk-hfstools.sh builds it
+if [ -f ../xnu-deps/build/hfs/newfs_hfs ]; then
+	cp ../xnu-deps/build/hfs/newfs_hfs root/bin/
+else
+	echo "build.sh: no newfs_hfs (../tools/mk-hfstools.sh): var_data=hfs can mount a data volume, not make one"
+fi
 cp com.hackios.varstore.plist root/LaunchDaemons/
 echo "Darwin on redwood: image built $(date '+%Y-%m-%d %H:%M')" > root/etc/motd
 # 300000 bytes, byte i = (i*31 + (i>>8)) & 0xff; init verifies it through read() and mmap()

@@ -1489,6 +1489,14 @@ main(int argc, char **argv, char **envp)
 			printf("var_store: not asked to keep the data volume (var_store=1): nothing to watch\n");
 			return 0;
 		}
+		if (boot_arg_is("var_data", "hfs")) {
+			/* /private/var is a volume on the flash (init.c): nothing to save; the boot guard still hears of it */
+			printf("var_store: the data volume is on the flash: nothing to save; bootok in %d s\n", BOOTOK_AFTER);
+			for (int i = 0; i < BOOTOK_AFTER * 10; i++) {
+				usleep(100000);
+			}
+			return bootok() ? 0 : 1;
+		}
 		/* seconds between saves: the job's argument, else var_save_every= (an installed phone's, which
 		 * may be reset by its keys with no warning: what is lost is what changed since the last save) */
 		const char *every = boot_arg("var_save_every");

@@ -835,6 +835,102 @@ read_whole(const char *path, char *buf, size_t size)
 	return (ssize_t)got;
 }
 
+/*
+ * An installed phone's data volume on the flash (var_data=hfs): HFS+, journaled, case-sensitive, on
+ * /dev/hk_data -- the store from its block 3145728 to its end (bsd/dev/hk_ufs.c; hk_data=1), or a volume in the
+ * kernel's memory for a RAM-only run (hk_data=2) -- mounted on /private/var and kept: what iOS writes is on
+ * the flash when it is written, not packed into an archive at the end (var_store.c). HFS+ is Apple's own
+ * (hfs-627.100.6, built into the kernel: bsd/hk_hfs) and so is the tool that makes it (newfs_hfs: tools/mk-hfstools.sh).
+ *
+ * A volume is made only where there is none: neither the volume header at byte 1024 nor the alternate one
+ * 1024 bytes before the end says HFS+ or HFSX, and var_data_format=1 is on the command line. A volume that is
+ * there and does not mount is left as it is -- the boot goes on with a memory filesystem, and says so -- so a
+ * fault can cost a boot's data, never the volume. data_volume: 0 none (memory), 1 kept from earlier boots,
+ * 2 new this boot (the template's directories go in, and the var store's archive once: restore_var).
+ */
+static int data_volume;
+
+#define DATA_MARKER     "/private/var/.hackios-data"
+
+struct hfs_args {                       /* hfs_mount_args (bsd/hk_hfs/core/hfs_mount.h), user space's view */
+	char *fspec;
+	uint32_t uid, gid;
+	uint16_t mask;
+	uint32_t encoding;
+	int32_t tz_minuteswest, tz_dsttime;
+	int32_t flags, journal_tbuffer_size, journal_flags, journal_disable;
+};
+
+/* is there an HFS+ / HFSX volume header in the 4096-byte block at `block`, `at` bytes into it */
+static int
+hfs_header_at(int fd, uint64_t block, unsigned at)
+{
+	static unsigned char b[4096];
+
+	return pread(fd, b, sizeof(b), (off_t)(block * sizeof(b))) == (ssize_t)sizeof(b) && b[at] == 'H' &&
+	       (b[at + 1] == '+' || b[at + 1] == 'X');
+}
+
+static int
+mount_data_volume(void)
+{
+	const char *arg = boot_arg("var_data");
+	struct hfs_args args;
+	uint64_t blocks = 0;
+	int fd, present, status = 0, fresh = 0;
+	struct stat st;
+
+	if (arg == NULL || strcmp(arg, "hfs") != 0) {
+		return 0;
+	}
+	printf("\n-- the data volume (var_data=hfs) --\n");
+	fd = open("/dev/rhk_data", O_RDWR, 0);
+	if (fd < 0 || ioctl(fd, 0x40086419 /* DKIOCGETBLOCKCOUNT */, &blocks) != 0 || blocks < 65536) {
+		printf("  /dev/rhk_data: %s\n", fd < 0 ? strerror(errno) : "no size, or too small");
+		check(0, "the data volume's device (hk_data=1 or 2)");
+		if (fd >= 0) {
+			close(fd);
+		}
+		return 0;
+	}
+	present = hfs_header_at(fd, 0, 1024) || hfs_header_at(fd, blocks - 1, 4096 - 1024);
+	close(fd);
+	printf("  /dev/hk_data: %llu MB, %s\n", (unsigned long long)(blocks >> 8), present ? "an HFS+ volume" : "no volume on it");
+	if (!present) {
+		arg = boot_arg("var_data_format");
+		if (arg == NULL || strcmp(arg, "1") != 0) {
+			check(0, "a data volume to mount (var_data_format=1 makes one)");
+			return 0;
+		}
+		{
+			char *argv[] = { (char *)in_image("/bin/newfs_hfs"), "-s", "-J", "-v", "Data", "/dev/rhk_data", NULL };
+			pid_t pid = fork();
+
+			if (pid == 0) {
+				execve(argv[0], argv, environ);
+				printf("  %s: %s\n", argv[0], strerror(errno));
+				_exit(127);
+			}
+			check(pid > 0 && wait4(pid, &status, 0, NULL) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+			    "make the data volume (newfs_hfs -s -J: HFSX, journaled)");
+			if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+				return 0;
+			}
+		}
+	}
+	memset(&args, 0, sizeof(args));
+	args.fspec = "/dev/hk_data";
+	if (mount("hfs", "/private/var", 0, &args) != 0) {
+		printf("  mount: %s -- the volume is left as it is; this boot keeps its data in memory\n", strerror(errno));
+		check(0, "mount the data volume on /private/var");
+		return 0;
+	}
+	fresh = stat(DATA_MARKER, &st) != 0;
+	check(1, fresh ? "mount the data volume on /private/var (new: the template goes in)" :
+	    "mount the data volume on /private/var (kept from earlier boots)");
+	return fresh ? 2 : 1;
+}
+
 static void
 mount_writable(void)
 {
@@ -845,12 +941,18 @@ mount_writable(void)
 	const char *jb;
 	struct stat st;
 
+	data_volume = mount_data_volume();
 	printf("\n-- writable filesystem --\n");
-	ok = mount("ramfs", "/private/var", 0, NULL) == 0;
+	if (data_volume == 1) {
+		/* (the package manager's prefix is grafted onto a new volume only: on this one it is there) */
+		printf("  /private/var on the flash, as earlier boots left it\n");
+		return;
+	}
+	ok = data_volume == 2 || mount("ramfs", "/private/var", 0, NULL) == 0;
 	if (!ok) {
 		printf("  mount: %s\n", strerror(errno));
 	}
-	check(ok, "mount a memory filesystem on /private/var");
+	check(ok, data_volume == 2 ? "/private/var on the new data volume" : "mount a memory filesystem on /private/var");
 
 	/* the directories of the data volume, as listed in the template that ships with iOS (ios165/mkvarskel.py) */
 	read_whole(in_image("/etc/var.skel"), skeleton, sizeof(skeleton));
@@ -998,9 +1100,16 @@ restore_var(void)
 	int status = 0;
 	pid_t pid;
 
+	if (data_volume == 1) {
+		return;                         /* on the flash already: nothing to unpack */
+	}
 	if (wanted == NULL || strcmp(wanted, "1") != 0) {
+		if (data_volume == 2) {
+			close(open(DATA_MARKER, O_WRONLY | O_CREAT, 0600));
+		}
 		return;
 	}
+	/* (on a new data volume, once: what the var store kept comes over, and the store is not used again) */
 	printf("\n-- the data volume of the last boot --\n");
 	argv[0] = (char *)in_image("/bin/var_store");
 	argv[1] = (char *)"load";
@@ -1013,6 +1122,10 @@ restore_var(void)
 	}
 	if (pid < 0 || wait4(pid, &status, 0, NULL) != pid || !WIFEXITED(status)) {
 		printf("  var_store did not run\n");
+	}
+	if (data_volume == 2) {
+		close(open(DATA_MARKER, O_WRONLY | O_CREAT, 0600));
+		printf("  the data volume holds it from now on\n");
 	}
 }
 

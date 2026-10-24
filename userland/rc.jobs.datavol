@@ -1,0 +1,17 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
+# The data volume on HFS+ (var_data=hfs; hk_data=2: in memory, a RAM-only run's, nothing of the flash written):
+# which filesystem /private/var is and how big, then a file written, read back, renamed over another
+# (RENAME_SWAP: Foundation's atomic writes) and its link counted, the volume again after two minutes of iOS.
+/sbin/mount
+/bin/df -k /private/var
+/hackios/bin/vol_ls fs /private/var
+/hackios/bin/vol_ls cat /private/var/redwood-stamp 4096
+/hackios/bin/var_store stamp /private/var/redwood-stamp
+/hackios/bin/vol_ls cat /private/var/redwood-stamp 4096
+/hackios/bin/vol_ls ls /private/var
+/hackios/bin/vol_ls ls /private/var/mobile/Library
+sleep 120
+/bin/df -k /private/var
+/hackios/bin/vol_ls fs /private/var
+/hackios/bin/vol_ls ls /private/var/mobile/Library/SpringBoard
+/sbin/mount
