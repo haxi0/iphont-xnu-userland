@@ -1,0 +1,14 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
+# The alert slider's path through iOS, without a hand on it: the kernel's record (rwtouch slider) for each
+# position, and what SpringBoard says of the ringer after each; Do Not Disturb is said by SpringBoard
+# itself (redwood: slider:) and seen in a screenshot. No sound is played.
+/hackios/bin/sound_test wait 45 ringer
+/hackios/bin/rwtouch slider middle wait 2
+/hackios/bin/sound_test ringer
+/hackios/bin/rwtouch slider down wait 2
+/hackios/bin/sound_test ringer
+/hackios/bin/rwtouch slider up wait 6
+/hackios/bin/sound_test ringer
+/hackios/bin/rwtouch slider middle wait 2
+/hackios/bin/sound_test ringer
+/bin/ps -A

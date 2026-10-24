@@ -751,6 +751,8 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFInd
 #define HID_USAGE_MENU                  0x40    /* the home button */
 #define HID_USAGE_VOLUME_UP             0xe9
 #define HID_USAGE_VOLUME_DOWN           0xea
+#define HID_PAGE_TELEPHONY              0x0b
+#define HID_USAGE_RINGER_SWITCH         0x2e    /* an iPhone's ring/silent switch (backboardd: page 0x0b, usage 0x2e; down: ring) */
 #define DIGITIZER_HAND                  3       /* kIOHIDDigitizerTransducerTypeHand */
 #define DIGITIZER_RANGE                 0x1     /* event mask: what has changed */
 #define DIGITIZER_TOUCH                 0x2
@@ -992,6 +994,37 @@ publish_lock_button(bool down)
 	notify_set_state(token, down ? 2 : 1);
 }
 
+/*
+ * The alert slider (HK_SLIDER): in the middle it is an iPhone's ring/silent switch set to silent, down
+ * and up set to ring; backboardd keeps that state for SpringBoard, which shows its own ringer HUD. Its
+ * position is also the state of the Darwin notification com.hackios.slider, which SpringBoard's side
+ * (inject_sb.c: slider_focus()) follows for Do Not Disturb at the top.
+ */
+static void
+send_slider(IOHIDServiceClientRef buttons, const struct hk_touch *t)
+{
+	static const char *const names[] = { "?", "down: ring", "in the middle: silent", "up: ring, Do Not Disturb" };
+	static int token = NOTIFY_TOKEN_INVALID;
+	IOHIDEventRef event;
+
+	if (t->finger < HK_SLIDER_DOWN || t->finger > HK_SLIDER_UP) {
+		return;
+	}
+	event = IOHIDEventCreateKeyboardEvent(NULL, t->time, HID_PAGE_TELEPHONY, HID_USAGE_RINGER_SWITCH,
+	    t->finger != HK_SLIDER_MIDDLE, 0);
+	IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
+	IOHIDVirtualServiceClientDispatchEvent(buttons, event);
+	CFRelease(event);
+	if (token == NOTIFY_TOKEN_INVALID && notify_register_check("com.hackios.slider", &token) != NOTIFY_STATUS_OK) {
+		token = NOTIFY_TOKEN_INVALID;
+	}
+	if (token != NOTIFY_TOKEN_INVALID) {
+		notify_set_state(token, t->finger);
+		notify_post("com.hackios.slider");
+	}
+	say("redwood: input: the alert slider is %s\n", names[t->finger]);
+}
+
 static void
 send_button(IOHIDServiceClientRef buttons, const struct hk_touch *t)
 {
@@ -1000,6 +1033,10 @@ send_button(IOHIDServiceClientRef buttons, const struct hk_touch *t)
 	    HID_USAGE_VOLUME_DOWN : 0;
 	IOHIDEventRef event;
 
+	if (t->type == HK_SLIDER) {
+		send_slider(buttons, t);
+		return;
+	}
 	if (usage == 0) {
 		return;
 	}
@@ -1072,6 +1109,17 @@ input_thread(__unused void *arg)
 	dispatch_semaphore_signal(input_services_made); /* see wait_for_als_arrival() */
 	if (screen == NULL) {
 		return NULL;
+	}
+	{
+		/* where the alert slider is now (bsd/dev/instantnoodle_slider.c): the kernel's record of it may be long read */
+		uint32_t position = 0;
+		size_t size = sizeof(position);
+
+		if (buttons != NULL && sysctlbyname("kern.hackios.slider", &position, &size, NULL, 0) == 0 && position != 0) {
+			struct hk_touch slider = { .time = mach_absolute_time(), .type = HK_SLIDER, .finger = position };
+
+			send_slider(buttons, &slider);
+		}
 	}
 
 	while (read(device, &t, sizeof(t)) == (ssize_t)sizeof(t)) {

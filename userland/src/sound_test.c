@@ -16,6 +16,7 @@
  *   system ID                          a system sound by its number (1100 is the lock sound,
  *                                      1104 a keyboard click), as SpringBoard plays them
  *   file PATH                          a sound file, played as a system sound
+ *   ringer                             what SpringBoard says of the ring/silent switch (ring or silent)
  *   route                              where iOS says its sound goes: the audio session's outputs and volume,
  *                                      and the devices of the system's output context
  *   haptic [SECONDS]                   haptics the way an application (and UIKit's feedback generators) plays
@@ -493,6 +494,15 @@ main(int argc, char **argv)
 			usleep((useconds_t)(atof(argv[++i]) * 1e6));
 		} else if (strcmp(argv[i], "springboard") == 0) {
 			wait_for_ringer();
+		} else if (strcmp(argv[i], "ringer") == 0) {
+			uint64_t state = 0;
+			int token;
+
+			if (notify_register_check("com.apple.springboard.ringerstate", &token) == NOTIFY_STATUS_OK) {
+				notify_get_state(token, &state);
+				notify_cancel(token);
+			}
+			printf("sound_test: ringer: %s (com.apple.springboard.ringerstate %llu)\n", state ? "ring" : "silent", state);
 		} else if (strcmp(argv[i], "route") == 0) {
 			route();
 		} else if (strcmp(argv[i], "restart") == 0) {

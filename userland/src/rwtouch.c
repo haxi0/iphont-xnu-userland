@@ -16,6 +16,7 @@
  *                                swipe and drag give them):
  *                                for measuring how far behind the finger the screen is (tools/latency.py)
  *   button NAME [MS]             press a button: home, lock, volup, voldown
+ *   slider down|middle|up        the alert slider there, as the kernel tells it (HK_SLIDER)
  *   read                         print the samples that arrive, forever (to watch the queue)
  *   notify NAME                  post a Darwin notification (com.hackios.unlock: see inject_sb.c)
  *   clock                        how long short sleeps really take (a check of the kernel's timers)
@@ -198,6 +199,19 @@ main(int argc, char **argv)
 			}
 			button(which, ms ? ms : 80);
 			i += ms ? 2 : 1;
+		} else if (strcmp(step, "slider") == 0 && left >= 1) {
+			const char *name = argv[++i];
+			struct hk_touch t = { .type = HK_SLIDER, .finger = strcmp(name, "down") == 0 ? HK_SLIDER_DOWN :
+				              strcmp(name, "middle") == 0 ? HK_SLIDER_MIDDLE : strcmp(name, "up") == 0 ? HK_SLIDER_UP : 0 };
+
+			if (t.finger == 0) {
+				fprintf(stderr, "rwtouch: the slider is down, middle or up\n");
+				return 2;
+			}
+			if (write(device, &t, sizeof(t)) != (ssize_t)sizeof(t)) {
+				perror("rwtouch: write");
+				return 1;
+			}
 		} else if (strcmp(step, "swipe") == 0 && left >= 4) {
 			int ms = left >= 5 && argv[i + 5][0] >= '0' && argv[i + 5][0] <= '9' ? atoi(argv[i + 5]) : 0;
 

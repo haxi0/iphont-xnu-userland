@@ -28,10 +28,12 @@
  *       com.hackios.unlock      what the lock screen does after "swipe up to open"
  *       com.hackios.layers      write down the layers SpringBoard has on the screen: see layers()
  *       com.hackios.switcher    open the switcher of running applications: see switcher()
+ *   - The OnePlus 8's alert slider at the top is Do Not Disturb: see slider_focus().
  *     In any other program given this library (INJECT in build.sh) only the last of them is
  *     answered, with that program's layers.
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CGGeometry.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
@@ -491,6 +493,207 @@ lock_long_press(id self, SEL selector, id recognizer)
 /* ---- remote control ------------------------------------------------------------------------------ */
 
 #define UNLOCK_SOURCE_COVER_SHEET       24      /* what the lock screen itself passes */
+
+/*
+ * The alert slider at the top (com.hackios.slider, its state HK_SLIDER_UP = 3, set by inject.c): Do Not
+ * Disturb, through the same DoNotDisturb service as Control Center's Focus module, but as an assertion of
+ * SpringBoard's client for hardware (com.apple.springboard.donotdisturb.hid, which its entitlements name), not
+ * Control Center's: a Focus the user turns on by hand is neither turned off nor replaced, and leaving the top
+ * gives up only this one. (Ring and silent are backboardd's: an iPhone's switch.)
+ */
+static id
+send0(id object, const char *selector)
+{
+	return object ? ((id (*)(id, SEL))objc_msgSend)(object, sel_registerName(selector)) : nil;
+}
+
+static unsigned long
+count_of(id array)
+{
+	return array ? ((unsigned long (*)(id, SEL))objc_msgSend)(array, sel_registerName("count")) : 0;
+}
+
+static id
+item_at(id array, unsigned long i)
+{
+	return ((id (*)(id, SEL, unsigned long))objc_msgSend)(array, sel_registerName("objectAtIndex:"), i);
+}
+
+static BOOL
+kind_of(id object, const char *class_name)
+{
+	Class class = objc_getClass(class_name);
+
+	return object != nil && class != Nil && ((BOOL (*)(id, SEL, Class))objc_msgSend)(object, sel_registerName("isKindOfClass:"), class);
+}
+
+static void
+set_hidden(id view, BOOL hidden)
+{
+	((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setHidden:"), hidden);
+}
+
+#define MOON_TAG        0x6d6f6f6e      /* our moon in the ringer's pill */
+
+/*
+ * iOS 16 has no HUD for Do Not Disturb from a switch: the ringer's pill (SBRingerPillView: the bell's animation,
+ * the titles "Silent Mode" and "Ringer", the states "On" and "Off", the ringer's volume) is dressed as one
+ * -- a moon for the bell, "Do Not Disturb" and "On", no volume -- and undressed for ring and silent again.
+ */
+static void
+pill_dress(id control, bool dnd)
+{
+	static id saved[4];
+	id pill = nil, bell = nil, subviews = send0(send0(send0(control, "ringerHUDViewController"), "view"), "subviews");
+	unsigned label = 0;
+
+	for (unsigned long i = 0; i < count_of(subviews) && pill == nil; i++) {
+		if (kind_of(item_at(subviews, i), "SBRingerPillView")) {
+			pill = item_at(subviews, i);
+		}
+	}
+	if (pill == nil) {
+		return;
+	}
+	subviews = send0(pill, "subviews");
+	for (unsigned long i = 0; i < count_of(subviews); i++) {
+		id view = item_at(subviews, i);
+
+		if (kind_of(view, "BSUICAPackageView")) {
+			id moon = ((id (*)(id, SEL, long))objc_msgSend)(pill, sel_registerName("viewWithTag:"), MOON_TAG);
+
+			set_hidden(view, dnd);
+			if (dnd && moon == nil) {
+				id image = ((id (*)(Class, SEL, CFStringRef))objc_msgSend)(objc_getClass("UIImage"),
+				    sel_registerName("systemImageNamed:"), CFSTR("moon.fill"));
+
+				moon = ((id (*)(id, SEL, id))objc_msgSend)(send0((id)objc_getClass("UIImageView"), "alloc"),
+				    sel_registerName("initWithImage:"), image);
+				((void (*)(id, SEL, long))objc_msgSend)(moon, sel_registerName("setTag:"), MOON_TAG);
+				((void (*)(id, SEL, long))objc_msgSend)(moon, sel_registerName("setContentMode:"), 1);  /* aspect fit */
+				((void (*)(id, SEL, id))objc_msgSend)(moon, sel_registerName("setTintColor:"),
+				    send0((id)objc_getClass("UIColor"), "systemIndigoColor"));
+				((void (*)(id, SEL, id))objc_msgSend)(pill, sel_registerName("addSubview:"), moon);
+			}
+			if (moon != nil) {
+				set_hidden(moon, !dnd);
+			}
+			bell = view;
+		} else if (kind_of(view, "UILabel") && label < 4) {
+			if (saved[label] == nil) {
+				saved[label] = send0(send0(view, "text"), "copy");
+			}
+			((void (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("setText:"), !dnd ? saved[label] :
+			    (id)(label < 2 ? CFSTR("Do Not Disturb") : CFSTR("On")));
+			send0(view, "invalidateIntrinsicContentSize");
+			label++;
+		} else if (kind_of(view, "SBRingerVolumeSliderView")) {
+			set_hidden(view, dnd);
+		}
+	}
+	/* the pill measured anew for the other words (it had sized itself for "Ringer" and "Silent Mode") */
+	send0(pill, "invalidateIntrinsicContentSize");
+	send0(pill, "setNeedsLayout");
+	send0(send0(pill, "superview"), "setNeedsLayout");
+	send0(send0(pill, "superview"), "layoutIfNeeded");
+	if (dnd && bell != nil) {
+		/* the moon where the bell is, once laid out: a sixth in from each side, the bell's size */
+		CGRect frame = ((CGRect (*)(id, SEL))objc_msgSend)(bell, sel_registerName("frame"));
+		id moon = ((id (*)(id, SEL, long))objc_msgSend)(pill, sel_registerName("viewWithTag:"), MOON_TAG);
+
+		frame.origin.x += frame.size.width / 6;
+		frame.origin.y += frame.size.height / 6;
+		frame.size.width *= 2.0 / 3;
+		frame.size.height *= 2.0 / 3;
+		((void (*)(id, SEL, CGRect))objc_msgSend)(moon, sel_registerName("setFrame:"), frame);
+	}
+}
+
+/*
+ * The slider's ring and silent, through SpringBoard's own ringer (SBRingerControl): muted or not, and its HUD,
+ * the one an iPhone's switch brings up (dressed for Do Not Disturb at the top: pill_dress()).
+ */
+static void
+slider_ringer(int position, bool hud)
+{
+	id app = send0((id)objc_getClass("UIApplication"), "sharedApplication");
+	id control = send0(app, "ringerControl");
+	BOOL silent = position == 2, muted;
+
+	if (control == nil) {
+		say("redwood: slider: SpringBoard has no ringer control\n");
+		return;
+	}
+	muted = ((BOOL (*)(id, SEL))objc_msgSend)(control, sel_registerName("isRingerMuted"));
+	if (muted != silent) {
+		((void (*)(id, SEL, BOOL))objc_msgSend)(control, sel_registerName("setRingerMuted:"), silent);
+	}
+	if (!hud) {
+		return;
+	}
+	/* (its argument is the switch's: on = ring) */
+	((void (*)(id, SEL, BOOL))objc_msgSend)(control, sel_registerName("activateRingerHUDFromMuteSwitch:"), !silent);
+	say("redwood: slider: the ringer %s (it was %s)%s\n", silent ? "silent" : "rings", muted ? "silent" : "ringing",
+	    position == 3 ? ", the HUD as Do Not Disturb" : "");
+	pill_dress(control, position == 3);
+}
+
+/* an NSError's description, as text */
+static const char *
+error_text(id error)
+{
+	id text = error ? ((id (*)(id, SEL))objc_msgSend)(error, sel_registerName("description")) : nil;
+	const char *utf8 = text ? ((const char *(*)(id, SEL))objc_msgSend)(text, sel_registerName("UTF8String")) : NULL;
+
+	return utf8 ? utf8 : "(no error)";
+}
+
+static void
+slider_focus(int token, bool hud)
+{
+	static int held = -1;           /* ours is held: 1, not: 0, not known: -1 */
+	uint64_t state = 0;
+	id service, error = nil;
+	bool up;
+
+	if (notify_get_state(token, &state) != NOTIFY_STATUS_OK || state == 0) {
+		return;
+	}
+	slider_ringer((int)state, hud);
+	up = state == 3;
+	if ((int)up == held) {
+		return;
+	}
+	if (objc_getClass("DNDModeAssertionService") == Nil) {
+		dlopen("/System/Library/PrivateFrameworks/DoNotDisturb.framework/DoNotDisturb", RTLD_NOW);
+	}
+	service = ((id (*)(Class, SEL, CFStringRef))objc_msgSend)(objc_getClass("DNDModeAssertionService"),
+	    sel_registerName("serviceForClientIdentifier:"), CFSTR("com.apple.springboard.donotdisturb.hid"));
+	if (service == nil) {
+		say("redwood: slider: no DoNotDisturb service\n");
+		return;
+	}
+	if (up) {
+		id details = ((id (*)(Class, SEL, CFStringRef, CFStringRef, id))objc_msgSend)(objc_getClass("DNDModeAssertionDetails"),
+		    sel_registerName("userRequestedAssertionDetailsWithIdentifier:modeIdentifier:lifetime:"),
+		    CFSTR("com.apple.springboard.donotdisturb.hid"), CFSTR("com.apple.donotdisturb.mode.default"), nil);
+		id assertion = ((id (*)(id, SEL, id, id *))objc_msgSend)(service, sel_registerName("takeModeAssertionWithDetails:error:"),
+		    details, &error);
+
+		say("redwood: slider: up: Do Not Disturb %s%s\n", assertion != nil ? "on" : "NOT TAKEN: ", assertion != nil ? "" :
+		    error_text(error));
+		held = assertion != nil;
+	} else {
+		BOOL done = ((BOOL (*)(id, SEL, id *))objc_msgSend)(service, sel_registerName("invalidateAllActiveModeAssertionsWithError:"),
+		    &error);
+
+		if (held != -1 || !done) {
+			say("redwood: slider: Do Not Disturb of the slider %s%s\n", done ? "given up" : "NOT GIVEN UP: ", done ? "" :
+			    error_text(error));
+		}
+		held = 0;
+	}
+}
 
 static void
 unlock(void)
@@ -1331,6 +1534,18 @@ hk_springboard_init(void)
 		    sysctl_int("kern.hackios.battery_charger_present"), sysctl_int("kern.hackios.battery_charging"));
 		battery_post_notifications();
 	});
+	notify_register_dispatch("com.hackios.slider", &token, dispatch_get_main_queue(), ^(int t) {
+		slider_focus(t, true);
+	});
+	{
+		/* where it is already, if backboardd has said: once SpringBoard is up (DoNotDisturb's service, asked while it
+		 * is starting, overflows the stack in Foundation) */
+		int slider = token;
+
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+			slider_focus(slider, false);
+		});
+	}
 	notify_register_dispatch("com.hackios.unlock", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		unlock();
 	});
