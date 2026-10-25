@@ -213,6 +213,11 @@ flash_root(const char *dev)
 		}
 		check(ok, "our Metal plug-in among the volume's extensions");
 	}
+	if (stat(in_image("/progressui"), &fw_st) == 0) {
+		/* the boot logo backboardd shows (ProgressUI's apple-logo*.png): ours, userland/bootlogo */
+		check(bind_dir(in_image("/progressui"), "/flash/System/Library/PrivateFrameworks/ProgressUI.framework"),
+		    "our boot logo in place of Apple's");
+	}
 	if (stat("/fw", &fw_st) == 0) {
 		/* the audio DSP's firmware and the speakers' configuration, from the RAM image as in a RAM boot */
 		check(synthetic_dir("/flash/fw") && bind_dir("/fw", "/flash/fw"), "the firmware on /fw (adsp=1, sound=N)");

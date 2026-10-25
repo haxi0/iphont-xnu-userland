@@ -29,6 +29,8 @@
  *       com.hackios.layers      write down the layers SpringBoard has on the screen: see layers()
  *       com.hackios.switcher    open the switcher of running applications: see switcher()
  *   - The OnePlus 8's alert slider at the top is Do Not Disturb: see slider_focus().
+ *   - Boot-arg sb_clock=N: the status bar's clock is centred N points further right, clear of the OnePlus 8's
+ *     camera hole: see statusbar_clock().
  *     In any other program given this library (INJECT in build.sh) only the last of them is
  *     answered, with that program's layers.
  */
@@ -1394,6 +1396,53 @@ ca_fps_start(void)
 	});
 }
 
+/* ---- the status bar's clock, clear of a camera hole -------------------------------------------- */
+
+/*
+ * Boot-arg sb_clock=N (points of the 375 x 812 the display reports; default 0, off): the status bar's left
+ * region -- on the iPhone X, which iOS takes this phone for, only the clock is in it -- is centred N points
+ * further right, so that the camera hole in the OnePlus 8's top left corner (instantnoodle.conf) does not
+ * cover the clock. iOS itself lays the status bar out that way: the clock is where UIKit puts it, and it
+ * animates and changes width with the rest. See statusbar_clock().
+ */
+static double sb_clock;
+static double (*sb_leading_centering)(id, SEL), (*sb_trailing_centering)(id, SEL);
+
+static double
+sb_leading_centering_moved(id self, SEL sel)
+{
+	return sb_leading_centering(self, sel) + sb_clock;
+}
+
+static double
+sb_trailing_centering_moved(id self, SEL sel)
+{
+	return sb_trailing_centering(self, sel) - sb_clock;
+}
+
+static void
+statusbar_clock(void)
+{
+	char args[1024] = "";
+	size_t size = sizeof(args) - 1;
+	const char *arg;
+
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0 || (arg = strstr(args, "sb_clock=")) == NULL ||
+	    (arg != args && arg[-1] != ' ')) {
+		return;
+	}
+	sb_clock = atof(arg + 9);
+	if (sb_clock <= 0 || sb_clock > 100) {
+		return;
+	}
+	sb_leading_centering = (double (*)(id, SEL))ca_hook("_UIStatusBarVisualProvider_FixedSplit", "leadingCenteringEdgeInset",
+	    (IMP)sb_leading_centering_moved);
+	sb_trailing_centering = (double (*)(id, SEL))ca_hook("_UIStatusBarVisualProvider_FixedSplit", "trailingCenteringEdgeInset",
+	    (IMP)sb_trailing_centering_moved);
+	say("redwood: sb_clock=%.1f: the status bar's clock %s\n", sb_clock,
+	    sb_leading_centering ? "is centred that much further right" : "NOT moved");
+}
+
 __attribute__((constructor))
 static void
 hk_springboard_init(void)
@@ -1429,6 +1478,7 @@ hk_springboard_init(void)
 	 */
 	load_tweaks();
 	ca_fps_start();
+	statusbar_clock();
 	/*
 	 * Everything the Metal driver says, it says with printf, and SpringBoard's standard output
 	 * goes nowhere -- so inside this process every refusal our driver prints has been invisible.

@@ -291,6 +291,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -fobjc-arc -framework Foundation -framework Accounts -o obj/store_test src/store_test.m &&
 			{ ${LDID:-ldid} -Ssrc/store_test.entitlements obj/store_test 2>/dev/null ||
 			  echo "build.sh: no ldid: store_test is unsigned, and accountsd will not show it the accounts"; }
+		$DYN -framework CoreFoundation -framework IOKit -o obj/power_test src/power_test.c
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
 		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
 			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
@@ -398,6 +399,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/store_test ] && cp obj/store_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
+	[ -f obj/power_test ] && cp obj/power_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
@@ -648,6 +650,12 @@ done
 # ... and our Metal plug-in, for the union over the volume's /System/Library/Extensions (src/init.c)
 mkdir -p root/ext
 [ -d root/lib/HKMetal.bundle ] && ln -sfn /hackios/lib/HKMetal.bundle root/ext/HKMetal.bundle
+# ... and the boot logo, bootlogo/ (mkbootlogo.py) in place of Apple's: a copy of ProgressUI.framework -- no
+# code in it, the code is in the shared cache -- with our apple-logo*.png, bound over the volume's (src/init.c)
+if ls bootlogo/apple-logo*.png >/dev/null 2>&1; then
+	cp -a $IOS/rootfs/System/Library/PrivateFrameworks/ProgressUI.framework root/progressui
+	cp bootlogo/apple-logo*.png root/progressui/
+fi
 # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
 # as it is, which the kernel's drivers use where it lies in memory (bsd/dev/hk_image.c)
 python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs hackios=root | tail -1
@@ -835,6 +843,11 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# was flipped, and buy nothing a missing boot-arg does not already buy.
 	mkdir -p sysroot/System/Library/Extensions
 	ln -s /hackios/lib/HKMetal.bundle sysroot/System/Library/Extensions/HKMetal.bundle
+	# the boot logo backboardd shows, bootlogo/ (mkbootlogo.py) in place of Apple's; rm first: hard links into ios165
+	if ls bootlogo/apple-logo*.png >/dev/null 2>&1; then
+		rm -f sysroot/System/Library/PrivateFrameworks/ProgressUI.framework/apple-logo*.png
+		cp bootlogo/apple-logo*.png sysroot/System/Library/PrivateFrameworks/ProgressUI.framework/
+	fi
 	# the OS cryptex: on a device a separate volume grafted at /System/Cryptexes/OS. It holds the dyld
 	# shared cache (dyld looks there first) and a few libraries and resources outside the cache.
 	mkdir -p sysroot/System/Cryptexes
