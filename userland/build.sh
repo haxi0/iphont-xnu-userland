@@ -204,6 +204,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -o obj/rwtouch src/rwtouch.c
 		# the kernel's thermal pressure passed on to iOS (src/thermald.c)
 		$DYN -o obj/thermald src/thermald.c
+		$DYN -fobjc-arc -framework Foundation -framework IOKit -o obj/iphontd src/iphontd.m
 		# (signed, if ldid is there: usernotificationsd takes notifications for an application only by an entitlement)
 		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c &&
 			{ ${LDID:-ldid} -Ssrc/sound_test.entitlements obj/sound_test 2>/dev/null ||
@@ -292,6 +293,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/store_test.entitlements obj/store_test 2>/dev/null ||
 			  echo "build.sh: no ldid: store_test is unsigned, and accountsd will not show it the accounts"; }
 		$DYN -framework CoreFoundation -framework IOKit -o obj/power_test src/power_test.c
+		$DYN -o obj/sched_test src/sched_test.c
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
 		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
 			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
@@ -382,6 +384,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	cp obj/hello_dyn obj/svc_test obj/surf_test obj/drawable_test obj/rwtouch obj/mg_test root/bin/
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/thermald ] && cp obj/thermald root/bin/
+	[ -f obj/iphontd ] && cp obj/iphontd root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
 	[ -f obj/metal_dev ] && cp obj/metal_dev root/bin/
@@ -400,6 +403,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/store_test ] && cp obj/store_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/power_test ] && cp obj/power_test root/bin/
+	[ -f obj/sched_test ] && cp obj/sched_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
@@ -558,7 +562,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
-	cp com.hackios.demo.plist com.hackios.wifi.plist com.hackios.thermald.plist root/LaunchDaemons/
+	cp com.hackios.demo.plist com.hackios.wifi.plist com.hackios.thermald.plist com.iphont.agent.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $IOS/rootfs.slt ] && VOLUME="--root-volume $IOS/rootfs.slt"
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $IOS/rootfs root/LaunchDaemons $IOS_JOBS
@@ -578,11 +582,23 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	for f in bd_m20gl.elf regdb_xiaomi.bin; do
 		[ -f ../fw-wifi/qca6750/$f ] && install -m 0644 ../fw-wifi/qca6750/$f root/fw/
 	done
+fi
+# ... or, for the OnePlus 8, its QCA6390's: linux-firmware's ath11k/QCA6390/hw2.0/amss.bin and m3.bin (3.9 MB;
+# Android's own crashes under ath11k) and the board's data file Android picks for this phone, image/12wlan.b0c of
+# the modem partition (bsd/dev/hk_wifi.c; the driver loads them itself, through MHI and QMI)
+if [ -f ../fw-wifi/amss.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-wifi/amss.bin ../fw-wifi/m3.bin ../fw-wifi/12wlan.b0c root/fw/
+fi
+if [ -f ../fw-wifi/wpss.mdt ] || [ -f ../fw-wifi/amss.bin ]; then
 	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
 	# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
-	rm -f root/fw/network
+	rm -f root/fw/network root/fw/mac
 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
+	# ... and the radio's own address (one line, six bytes in hexadecimal with colons), which the kernel takes
+	# when it is not given wifi_mac=: an installed boot has no xl to pass it. The phone's, so left out as well
+	if [ -z "$SHARE" ] && [ -f ../fw-wifi/mac ]; then install -m 0600 ../fw-wifi/mac root/fw/mac; fi
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (bsd/dev/hk_haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either). The OnePlus 8's
@@ -631,6 +647,7 @@ echo "build.sh: fw/: $(ls -1 root/fw 2>/dev/null | wc -l) files from ../fw-*:${f
 # private key for ssh. Both are one small file inside 2.5 GB, and nobody would notice either leave.
 secrets=
 [ -f root/fw/network ] && secrets="$secrets fw/network (the name and passphrase of your Wi-Fi)"
+[ -f root/fw/mac ] && secrets="$secrets fw/mac (your radio's address)"
 [ -f root/var/root/.ssh/ssh_host_ed25519_key ] &&
 	secrets="$secrets /var/root/.ssh/ssh_host_ed25519_key (a private key)"
 if [ -n "$secrets" ]; then

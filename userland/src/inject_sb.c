@@ -73,6 +73,8 @@ say(const char *format, ...)
 	write(say_fd, line, (size_t)n);
 }
 
+#include "hkprof.h"
+
 /*
  * Boot-arg touch_lat=1: a line for every turn of SpringBoard's main run loop -- when it woke up (a
  * touch, a timer, the display link ...), when CoreAnimation's commit of what that turn changed
@@ -1018,6 +1020,14 @@ layer_line(id layer, const char *role, int depth)
 		    SEND(BOOL, layer, "inheritsSecurity") ? " (inherits security)" : "",
 		    SEND(BOOL, layer, "rendersAsynchronously") ? " (asynchronously)" : "");
 	}
+	if (SEND(float, layer, "shadowOpacity") > 0) {
+		struct { double w, h; } offset = SEND(typeof(offset), layer, "shadowOffset");
+		void *path = SEND(void *, layer, "shadowPath");
+
+		n += (size_t)snprintf(more + n, sizeof(more) - n, " SHADOW opacity %g radius %g offset %g,%g%s",
+		    (double)SEND(float, layer, "shadowOpacity"), SEND(double, layer, "shadowRadius"), offset.w, offset.h,
+		    path != NULL ? " (path)" : "");
+	}
 	{
 		/* the view a layer belongs to, which is the only thing that names a layer UIKit left
 		   unnamed -- and the switcher's wash of wallpaper is such a layer */
@@ -1323,16 +1333,61 @@ ca_init_animation(id self, SEL selector)
 	return self;
 }
 
+/*
+ * Display links of things that move slowly and always -- the Clock icon's hands (SBUIPreciseClockTimer, SBHClockApplicationIconImageView:
+ * the one animation that runs on a home screen with nothing else happening) -- are held to ca_ambient frames a second instead of the
+ * panel's: 86 a second kept backboardd at 40% of a core and the panel's pipeline busy (kern.hackios.top: 7.3 s of processor time in 15 s of
+ * a home screen left alone), for a hand that turns 6 degrees a second. 30 is a third of the panel's 90, so frames still fall
+ * on its refreshes evenly. Boot-arg ca_ambient=N (0: as every other link); ca_links=1 says which links are made.
+ */
+static IMP ca_link_new;
+static float ca_ambient = 30;
+static char ca_ambient_key;
+
+static bool
+ca_is_ambient(id link)
+{
+	return ca_ambient > 0 && objc_getAssociatedObject(link, &ca_ambient_key) != nil;
+}
+
+static id
+ca_new_link(id self, SEL selector, id target, SEL action)
+{
+	static char said[16][64];
+	static unsigned count;
+	const char *name = target ? object_getClassName(target) : "?";
+	id link = ((id (*)(id, SEL, id, SEL))ca_link_new)(self, selector, target, action);
+	unsigned i;
+
+	if (ca_ambient > 0 && link != nil && strstr(name, "Clock") != NULL) {
+		objc_setAssociatedObject(link, &ca_ambient_key, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		if (ca_link_range != NULL) {
+			((void (*)(id, SEL, ca_range))ca_link_range)(link, sel_registerName("setPreferredFrameRateRange:"),
+			    (ca_range){ 15, ca_ambient, ca_ambient });
+		}
+	}
+	for (i = 0; i < count; i++) {
+		if (strcmp(said[i], name) == 0) {
+			break;
+		}
+	}
+	if (i == count && count < 16) {
+		snprintf(said[count++], sizeof(said[0]), "%s", name);
+		say("redwood: a display link is made for %s %s%s\n", name, sel_getName(action), strstr(name, "Clock") ? " (held to the ambient rate)" : "");
+	}
+	return link;
+}
+
 static void
 ca_set_link_range(id self, SEL selector, __unused ca_range range)
 {
-	((void (*)(id, SEL, ca_range))ca_link_range)(self, selector, ca_lifted());
+	((void (*)(id, SEL, ca_range))ca_link_range)(self, selector, ca_is_ambient(self) ? (ca_range){ 15, ca_ambient, ca_ambient } : ca_lifted());
 }
 
 static void
 ca_set_link_fps(id self, SEL selector, __unused long fps)
 {
-	((void (*)(id, SEL, long))ca_link_fps)(self, selector, 0);         /* 0: as fast as the display */
+	((void (*)(id, SEL, long))ca_link_fps)(self, selector, ca_is_ambient(self) ? (long)ca_ambient : 0);   /* 0: as fast as the display */
 }
 
 /*
@@ -1384,6 +1439,16 @@ ca_fps_start(void)
 	ca_animation_init = ca_animation_range ? ca_hook("CAAnimation", "init", (IMP)ca_init_animation) : NULL;
 	ca_link_range = ca_hook("CADisplayLink", "setPreferredFrameRateRange:", (IMP)ca_set_link_range);
 	ca_link_fps = ca_hook("CADisplayLink", "setPreferredFramesPerSecond:", (IMP)ca_set_link_fps);
+	if ((arg = strstr(args, "ca_ambient=")) != NULL) {
+		ca_ambient = (float)atoi(arg + 11);
+	}
+	{
+		Method m = class_getClassMethod(objc_getClass("CADisplayLink"), sel_registerName("displayLinkWithTarget:selector:"));
+
+		if (m != NULL && (ca_ambient > 0 || strstr(args, "ca_links=1") != NULL)) {
+			ca_link_new = method_setImplementation(m, (IMP)ca_new_link);
+		}
+	}
 	say("redwood: ca_fps=%d: animations %s, display links %s\n", (int)ca_fps,
 	    ca_animation_init ? "lifted" : "NOT lifted", ca_link_range ? "lifted" : "NOT lifted");
 	/* what the screen itself would have said, once UIKit is up */
@@ -1462,6 +1527,15 @@ hk_springboard_init(void)
 		layers_of = who;
 		if ((say_fd = open("/dev/console", O_WRONLY | O_NOCTTY)) < 0) {
 			say_fd = 2;
+		}
+		if (boot_arg_is_set("hkprof=1") || boot_arg_is_set("hkprof=2")) {
+			static char profiled[64];
+
+			snprintf(profiled, sizeof(profiled), "%s", name);
+			hkprof_register(profiled, say);
+			if (boot_arg_is_set("hkprof=2")) {      /* =2: the sampling starts with the program (a widget's, which is made after the wake) */
+				hkprof_start();
+			}
 		}
 		say("redwood: in %s[%d]: its layers are said on the notification com.hackios.layers\n", name, getpid());
 		notify_register_dispatch("com.hackios.layers", &token, dispatch_get_main_queue(), ^(__unused int t) {
@@ -1599,12 +1673,33 @@ hk_springboard_init(void)
 	notify_register_dispatch("com.hackios.unlock", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		unlock();
 	});
+	if (boot_arg_is_set("hkprof=1")) {
+		hkprof_register("SpringBoard", say);
+	}
 	notify_register_dispatch("com.hackios.layers", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		layers();
 	});
 	notify_register_dispatch("com.hackios.switcher", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		switcher();
 	});
+	/* com.hackios.brightness.NN: the brightness set to NN per cent as Settings sets it (BackBoardServices, in a program
+	   backboardd listens to), for tests (tools/t brightness); the name carries the number because a notification has none */
+	{
+		static const int levels[] = { 5, 20, 50, 90, 100 };
+		void *bbs = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
+		void (*set)(float, int) = bbs ? dlsym(bbs, "BKSDisplayBrightnessSet") : NULL;
+
+		for (unsigned i = 0; set != NULL && i < sizeof(levels) / sizeof(levels[0]); i++) {
+			char name[40];
+			int level = levels[i];
+
+			snprintf(name, sizeof(name), "com.hackios.brightness.%d", level);
+			notify_register_dispatch(name, &token, dispatch_get_main_queue(), ^(__unused int t) {
+				say("redwood: brightness %d%% asked of backboardd\n", level);
+				set((float)level / 100.0f, 1);
+			});
+		}
+	}
 	/*
 	 * Belt-and-suspenders unlock. The user can always swipe up to open the home screen -- that
 	 * works fine when the touch driver is doing its job. But if touch is still probing, has

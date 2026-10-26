@@ -74,6 +74,8 @@ say(const char *format, ...)
 	write(2, line, (size_t)n);
 }
 
+#include "hkprof.h"
+
 /* Replace one entry of a virtual table (unslid address `slot`) that must now hold `expected`. */
 static void *
 replace_virtual(const char *what, uintptr_t slot, uintptr_t expected, void *replacement)
@@ -1406,6 +1408,9 @@ hk_init(void)
 			dispatch_async(dispatch_get_main_queue(), ^{
 				ca_ideal_rate(rate, 0);
 			});
+		}
+		if (strstr(arguments, "hkprof=1") != NULL) {
+			hkprof_register("backboardd", say);
 		}
 		opengl_es();
 		window_server_fixes();

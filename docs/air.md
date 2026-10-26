@@ -218,7 +218,7 @@ of counted. The numbers above are from suites where 11 of each conversion's 22 i
   goes up is a figure nobody is checking; this one went up three times for work and down once for
   a better instrument.
 - **Two traps this frontend's own checks fell into, kept here for the instances; the general forms
-  are in the "How our own checks lie" notes (docs/checks.md in hackios-xnu-kernel), which collects all six and belongs there because
+  are in the "How our own checks lie" notes (docs/research/checks.md in hackios-xnu-kernel), which collects all six and belongs there because
   the others came from the camera, the services and the build rather than from AIR.** Comparing one
   file of Mesa's `main` against ours had to start from a fresh tarball extract, because ours carries
   our own patch — 202 487 bytes against 202 144 clean — so a comparison from this tree would have
@@ -778,7 +778,7 @@ of counted. The numbers above are from suites where 11 of each conversion's 22 i
   Images are read back after a dispatch, which also matters for the textures: most of these
   kernels write *only* an image, so without the readback a dispatch would have reported success
   with nothing examined — and that is the shape this check has been caught by three times
-  (docs/checks.md in hackios-xnu-kernel). The readback is what `air.write_texture_2d/3d` needed
+  (docs/research/checks.md in hackios-xnu-kernel). The readback is what `air.write_texture_2d/3d` needed
   as well, which `texopcheck.py` had listed as having no case for exactly this reason.
 
   So the atomics being checked (above) is still a statement about two kernels written here for

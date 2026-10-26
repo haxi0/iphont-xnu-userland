@@ -222,7 +222,11 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
         # these start, crash and are asked for again, over and over. (aggregated, which was among them, is where
         # iOS 16 keeps its power log -- com.apple.powerlog.plxpclogger.xpc and the rest -- that Settings > Battery
         # waits for; it now runs through a session.)
-        'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced')
+        'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced',
+        # the voicemail daemon asks launchd for CommCenter's service (com.apple.commcenter.coretelephony.xpc) in a loop with no
+        # delay -- 1363 failed lookups in 70 s, 40% of a core for ever (kern.hackios.top: 4.9 s of 14 in a gesture test) -- and CommCenter
+        # is denied above: there is no modem. A phone with no voicemail has nothing for it to do.
+        'com.apple.voicemail.vmd')
 
 # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
 DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())

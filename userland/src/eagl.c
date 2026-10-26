@@ -1854,6 +1854,12 @@ static const char table_fragment[] =
 #define FUNCTION_SHADOW_BLUR            40
 #define FUNCTION_VIBRANT_MATRIX         45
 
+/*
+ * The matrix's own alpha (its fourth row reads the colour behind: the App Library's pods have alpha 0.44 over a
+ * mid-bright wallpaper) is the colour's opacity, so the result is laid over what is behind, premultiplied, by the
+ * layer's coverage: s * a + behind * (1 - s.alpha * a). A mix of the two, as this was, is the same only where the
+ * matrix leaves alpha at 1, and over a wallpaper it wrote the tint in place of it: flat grey pods.
+ */
 static const char vibrant_fragment[] =
     "#version 300 es\n"
     "#extension GL_EXT_shader_framebuffer_fetch : require\n"
@@ -1869,7 +1875,7 @@ static const char vibrant_fragment[] =
     "  s = s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4];\n"
     "  s.a = clamp(s.a, 0., 1.);\n"
     "  s.rgb = clamp(s.rgb * s.a, 0., 1.);\n"
-    "  result = mix(behind, s, layer.a);\n"
+    "  result = s * layer.a + behind * (1. - s.a * layer.a);\n"
     "}\n";
 static const char masking_fragment[] =
     "#version 300 es\n"
@@ -2676,7 +2682,7 @@ static const char group_over_fragment[] =
     "  s = s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4];\n"
     "  s.a = clamp(s.a, 0., 1.);\n"
     "  s.rgb = clamp(s.rgb * s.a, 0., 1.);\n"
-    "  result = mix(behind, s, layer.a);\n"
+    "  result = s * layer.a + behind * (1. - s.a * layer.a);\n"
     "}\n";
 static const char group_flat_fragment[] =
     "#version 300 es\n"

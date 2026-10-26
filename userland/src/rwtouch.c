@@ -20,13 +20,24 @@
  *   read                         print the samples that arrive, forever (to watch the queue)
  *   notify NAME                  post a Darwin notification (com.hackios.unlock: see inject_sb.c)
  *   clock                        how long short sleeps really take (a check of the kernel's timers)
+ *   idle PCT SECS                wait until the processors are at most PCT per cent busy for two seconds in a row,
+ *                                or SECS at the most (what follows a start-up or a wake: a fixed wait is either too
+ *                                long or too short); prints how long it took
+ *   frames RATE SECS             wait until the window server draws at least RATE frames a second, two seconds in a
+ *                                row (a home screen that is alive; the CPU being idle says nothing of that: it is idle
+ *                                before SpringBoard has started too), or SECS at the most
+ *   uptime SECS                  wait until the system has run SECS seconds (the governor takes over at 45)
+ *   mark NAME                    print "t-mark: NAME" on the console, which tools/t's runs end on (xl: XL_DONE)
  * Positions are fractions of the screen: 0 0 is the top left corner, 1 1 the bottom right.
  * Example, "swipe up from the bottom edge two minutes after boot":
  *   rwtouch wait 120 swipe 0.5 0.99 0.5 0.4 250
  */
 #include <fcntl.h>
 #include <mach/mach_time.h>
+#include <mach/mach.h>
 #include <notify.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
 #include <pthread.h>
 #include <sys/qos.h>
 #include <stdio.h>
@@ -149,6 +160,99 @@ zigzag(double x, double y0, double y1, int ms, int times, int step_ms)
 	post(HK_TOUCH_UP, x, y0);
 }
 
+/* Busy per cent of all processors between two calls (HOST_CPU_LOAD_INFO ticks); -1 the first time. */
+static int
+busy_percent(void)
+{
+	static unsigned long long last_busy, last_all;
+	host_cpu_load_info_data_t load;
+	mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+	unsigned long long busy, all;
+	int percent;
+
+	if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&load, &count) != KERN_SUCCESS) {
+		return -1;
+	}
+	busy = (unsigned long long)load.cpu_ticks[CPU_STATE_USER] + load.cpu_ticks[CPU_STATE_SYSTEM] + load.cpu_ticks[CPU_STATE_NICE];
+	all = busy + load.cpu_ticks[CPU_STATE_IDLE];
+	percent = last_all != 0 && all > last_all ? (int)((busy - last_busy) * 100 / (all - last_all)) : -1;
+	last_busy = busy;
+	last_all = all;
+	return percent;
+}
+
+/* Until the load has been at most `percent` for two seconds in a row, or `max_seconds`. */
+static void
+wait_idle(int percent, double max_seconds)
+{
+	uint64_t start = mach_absolute_time();
+	int calm = 0, now_percent = -1;
+	double took;
+
+	(void)busy_percent();
+	for (;;) {
+		usleep(500000);
+		now_percent = busy_percent();
+		calm = now_percent >= 0 && now_percent <= percent ? calm + 1 : 0;
+		took = (double)(mach_absolute_time() - start) * timebase.numer / timebase.denom / 1e9;
+		if (calm >= 4 || took >= max_seconds) {
+			break;
+		}
+	}
+	printf("rwtouch: idle: %s after %.1f s (busy %d%%)\n", calm >= 4 ? "reached" : "NOT reached", took, now_percent);
+	fflush(stdout);
+}
+
+static void
+wait_frames(int rate, double max_seconds)
+{
+	uint64_t start = mach_absolute_time();
+	long long before = -1;
+	int calm = 0;
+	double took = 0, per_second = 0;
+
+	for (;;) {
+		long long now = -1;
+		int frames = 0;
+		size_t size = sizeof(frames);
+
+		usleep(500000);
+		if (sysctlbyname("kern.hackios.frames", &frames, &size, NULL, 0) == 0) {
+			now = frames;
+		}
+		per_second = before >= 0 && now >= before ? (double)(now - before) * 2 : 0;
+		before = now;
+		calm = per_second >= rate ? calm + 1 : 0;
+		took = (double)(mach_absolute_time() - start) * timebase.numer / timebase.denom / 1e9;
+		if (calm >= 4 || took >= max_seconds) {
+			break;
+		}
+	}
+	printf("rwtouch: frames: %s after %.1f s (%.0f a second)\n", calm >= 4 ? "reached" : "NOT reached", took, per_second);
+	fflush(stdout);
+}
+
+static void
+wait_uptime(double seconds)
+{
+	struct timeval boot;
+	size_t size = sizeof(boot);
+	int name[2] = { CTL_KERN, KERN_BOOTTIME };
+
+	if (sysctl(name, 2, &boot, &size, NULL, 0) != 0) {
+		return;
+	}
+	for (;;) {
+		struct timeval now;
+
+		gettimeofday(&now, NULL);
+		if ((double)(now.tv_sec - boot.tv_sec) + (now.tv_usec - boot.tv_usec) / 1e6 >= seconds) {
+			break;
+		}
+		usleep(200000);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -223,6 +327,19 @@ main(int argc, char **argv)
 			drag(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]), atoi(argv[i + 5]),
 			    atoi(argv[i + 6]), grab);
 			i += grab ? 7 : 6;
+		} else if (strcmp(step, "idle") == 0 && left >= 2) {
+			wait_idle(atoi(argv[i + 1]), atof(argv[i + 2]));
+			i += 2;
+		} else if (strcmp(step, "frames") == 0 && left >= 2) {
+			wait_frames(atoi(argv[i + 1]), atof(argv[i + 2]));
+			i += 2;
+		} else if (strcmp(step, "uptime") == 0 && left >= 1) {
+			wait_uptime(atof(argv[i + 1]));
+			i += 1;
+		} else if (strcmp(step, "mark") == 0 && left >= 1) {
+			printf("t-mark: %s at %llu\n", argv[i + 1], (unsigned long long)((mach_absolute_time() * timebase.numer / timebase.denom) / 1000));
+			fflush(stdout);
+			i += 1;
 		} else if (strcmp(step, "notify") == 0 && left >= 1) {
 			uint32_t status = notify_post(argv[i + 1]);
 

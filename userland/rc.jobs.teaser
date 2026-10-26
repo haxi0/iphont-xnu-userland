@@ -1,0 +1,33 @@
+# Commands run by the launchd job com.hackios.demo (RC_JOBS=rc.jobs.teaser): the teaser video, played on an
+# installed phone that boots from its flash as on any day, every step a finger would take:
+#   the lock screen opened; Settings; Sounds & Haptics > Ringtone, two tones tapped (each plays;
+#   Opening, the default, last, so the ringtone is left as it was), back home;
+#   the screen locked and woken; the lock screen's flashlight held on (its haptic and the LED) and held off;
+#   15 s for the alert slider, moved by hand (its HUD shows on the lock screen); locked; side button +
+#   volume up held for the power-off screen, its slider swiped: the phone switches off.
+# Installed, not run from the computer (the menu boots the newest bundle):
+#   CRYPTEXES=flash FLASHBOOT=1 GL=1 REST=1 RC_JOBS=rc.jobs.teaser userland/build.sh
+#   SKIP_BUILD=1 common/flash/install-xl.sh instantnoodle bundle
+# and the everyday bundle installed again afterwards (common/flash/install-xl.sh instantnoodle bundle).
+# Positions measured with xl screenshot during xl runs (2026-10-24): the home screen, Settings as it opens (not
+# scrolled: a scroll back past the top shows the search field and moves every row down), Sounds & Haptics,
+# Ringtone, the lock screen, the power-off screen. SpringBoard was up 35 s after this job started.
+#
+# unlock once the lock screen has been on show for a while (the boot, SpringBoard's sb_delay=8)
+/hackios/bin/rwtouch wait 45 swipe 0.5 0.985 0.5 0.3 250 wait 2.5
+# Settings > Sounds & Haptics > Ringtone > Apex, then Opening
+/hackios/bin/rwtouch tap 0.615 0.71 wait 3 tap 0.3 0.59 wait 2.5 tap 0.3 0.6 wait 2.5 tap 0.3 0.334 wait 4 tap 0.3 0.28 wait 4
+# Back twice, home
+/hackios/bin/rwtouch tap 0.1 0.081 wait 1.5 tap 0.1 0.081 wait 1.5 swipe 0.5 0.995 0.5 0.55 150 wait 2.5
+# locked, woken: the lock screen
+/hackios/bin/rwtouch button lock wait 2.5 button lock wait 2.5
+# the flashlight: held on (haptic + LED), 4 s, held off
+/hackios/bin/rwtouch hold 0.19 0.907 1000 wait 4 hold 0.19 0.907 1000 wait 2
+# the alert slider, by hand
+/hackios/bin/rwtouch wait 15
+# locked; then side button and volume up together (the line with "&" is not waited for)
+/hackios/bin/rwtouch button lock wait 2.5
+/hackios/bin/rwtouch button lock 2500 &
+/hackios/bin/rwtouch wait 0.15 button volup 2350 wait 2
+# slide to power off
+/hackios/bin/rwtouch swipe 0.24 0.105 0.88 0.105 700

@@ -1,0 +1,25 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
+# The system's power with no hands (src/power_test.c; the run with sleep_max=40, so that no sleep outlasts it):
+#   1. the side button as iOS gets it (rwtouch button lock): the screen off -- the panel asleep, the touch chip in
+#      reset, the memory's vote down --, 20 s, and on again
+#   2. three sleeps of 20 s each with a wake asked for (IOPMrootDomain "wake"): the clocks across each
+#   3. the screen locked and left: whether iOS (powerd) puts the system to sleep by itself, and back
+# Every result goes to a file and is shown at the end, where the kernel's log keeps it.
+sleep 70
+/hackios/bin/power_test status >> /private/var/results
+/hackios/bin/rwtouch button lock
+sleep 20
+/hackios/bin/power_test status >> /private/var/results
+/hackios/bin/rwtouch button lock
+sleep 10
+/hackios/bin/power_test status >> /private/var/results
+/hackios/bin/power_test sleep 20 3 >> /private/var/results
+/hackios/bin/rwtouch button lock
+sleep 30
+/hackios/bin/power_test status >> /private/var/results
+sleep 30
+/hackios/bin/power_test status >> /private/var/results
+/hackios/bin/rwtouch button lock
+sleep 10
+/hackios/bin/power_test status >> /private/var/results
+/hackios/bin/vol_ls cat /private/var/results 262144

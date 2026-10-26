@@ -1,0 +1,9 @@
+# Commands run by the launchd job com.hackios.demo (see com.hackios.demo.plist).
+# Still pictures of what the shadows and materials look like, for tools/look/run.sh to take from the computer (xl
+# screenshot) and compare between runs. With boot-arg autounlock=0 the lock screen stays until swiped away.
+#   0-50 s    the lock screen, left alone; its layers written down at 40 s (com.hackios.layers)
+#   50-100 s  unlocked: the home screen, then the App Library (two pages left), standing
+#   100-125 s the App Library scrolled up and down for 21 s (pictures taken while it moves);
+#   then home and Control Center (from the top right corner), for the vibrant materials there
+/hackios/bin/rwtouch wait 40 notify com.hackios.layers wait 15 swipe 0.5 0.985 0.5 0.3 200 wait 20 swipe 0.85 0.5 0.15 0.5 300 wait 6 swipe 0.85 0.5 0.15 0.5 300 wait 15
+/hackios/bin/rwtouch zigzag 0.5 0.75 0.45 1500 7 wait 3 button home wait 5 swipe 0.92 0.003 0.92 0.5 300 wait 10
