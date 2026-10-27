@@ -8,6 +8,9 @@
  *                                      as on an iPhone with its switch on silent
  *   tone SECONDS [LEFT_HZ RIGHT_HZ]    a sine wave in each channel (default 1000 and 440 Hz) at half of
  *                                      full scale, through an audio queue: what a music player does
+ *   bluetooth-tone SECONDS             wait up to SECONDS for CMF Buds Pro 2 A2DP, then play 2 s at 1% peak;
+ *                                      fail silently if the target route never appears
+ *   bluetooth-level PEAK               bluetooth-tone at PEAK instead of 1%, 10% at most (owner-approved 2026-10-27)
  *   level PEAK                         the tones after this one at PEAK of full scale (0 to 1) instead
  *                                      (before iOS's volume, which scales the samples itself)
  *   raw SECONDS                        the same tone written straight to /dev/hk-audio, past iOS's own
@@ -257,6 +260,59 @@ route(void)
 	}
 }
 
+/* Diagnostic only: never send the approved quiet tone to a speaker or another paired device. */
+static double bt_peak = 0.01;
+
+static int
+bluetooth_tone(double timeout)
+{
+	id session = send((id)objc_getClass("AVAudioSession"), "sharedInstance"), error = NULL;
+	Boolean ok;
+	CFAbsoluteTime deadline;
+
+	if (!isfinite(timeout) || timeout < 1 || timeout > 300) {
+		printf("sound_test: bluetooth-tone timeout must be 1..300 seconds\n");
+		return 1;
+	}
+	ok = session && ((Boolean (*)(id, SEL, id, id *))objc_msgSend)(session,
+	    sel_registerName("setCategory:error:"), (id)CFSTR("AVAudioSessionCategoryPlayback"), &error);
+	if (ok) {
+		ok = ((Boolean (*)(id, SEL, Boolean, id *))objc_msgSend)(session,
+		    sel_registerName("setActive:error:"), true, &error);
+	}
+	if (!ok) {
+		printf("sound_test: audio session failed: %s\n", text(send(error, "description")));
+		return 1;
+	}
+	printf("sound_test: waiting for CMF Buds Pro 2 A2DP; at most %.0f s; no speaker fallback\n", timeout);
+	deadline = CFAbsoluteTimeGetCurrent() + timeout;
+	while (CFAbsoluteTimeGetCurrent() < deadline) {
+		id outputs = send(send(session, "currentRoute"), "outputs");
+		unsigned long count = outputs ? ((unsigned long (*)(id, SEL))objc_msgSend)(outputs, sel_registerName("count")) : 0;
+
+		if (count == 1) {
+			id port = ((id (*)(id, SEL, unsigned long))objc_msgSend)(outputs, sel_registerName("objectAtIndex:"), 0);
+			if (strcmp(text(send(port, "portType")), "BluetoothA2DPOutput") == 0 &&
+			    strcmp(text(send(port, "portName")), "CMF Buds Pro 2") == 0) {
+				int result;
+				double saved_peak = peak;
+				route();
+				peak = bt_peak;
+				result = tone(2);
+				peak = saved_peak;
+				((Boolean (*)(id, SEL, Boolean, id *))objc_msgSend)(session,
+				    sel_registerName("setActive:error:"), false, &error);
+				return result;
+			}
+		}
+		CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+	}
+	route();
+	printf("sound_test: Bluetooth route absent; no tone played\n");
+	((Boolean (*)(id, SEL, Boolean, id *))objc_msgSend)(session, sel_registerName("setActive:error:"), false, &error);
+	return 1;
+}
+
 /* CoreHaptics' constants (NSString *) by name, the framework opened when first asked for */
 static id
 haptics_constant(const char *name)
@@ -503,6 +559,11 @@ main(int argc, char **argv)
 				notify_cancel(token);
 			}
 			printf("sound_test: ringer: %s (com.apple.springboard.ringerstate %llu)\n", state ? "ring" : "silent", state);
+		} else if (strcmp(argv[i], "bluetooth-level") == 0 && i + 1 < argc) {
+			bt_peak = atof(argv[++i]);
+			bt_peak = isfinite(bt_peak) && bt_peak > 0 ? (bt_peak < 0.1 ? bt_peak : 0.1) : 0.01;
+		} else if (strcmp(argv[i], "bluetooth-tone") == 0 && i + 1 < argc) {
+			failed |= bluetooth_tone(atof(argv[++i]));
 		} else if (strcmp(argv[i], "route") == 0) {
 			route();
 		} else if (strcmp(argv[i], "restart") == 0) {

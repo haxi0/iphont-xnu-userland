@@ -231,6 +231,18 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
 # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
 DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())
 
+# BLUETOOTH=1 (the OnePlus 8, kernel boot-arg bt=1): iOS's own Bluetooth daemons are let in -- bluetoothd,
+# bluetoothuserd, the BTServer family -- and bluetoothd is told where its controller is. Without that it asks for
+# the Skywalk channel com.apple.uart.sk.bluetooth, which this kernel has not got; BT_HCI_TRANSPORT is its own way
+# of being told otherwise (TRANSPORT:DRIVER:device,speed, read before the device tree is): plain H4 through the
+# POSIX driver, on the kernel control socket com.apple.uart.bluetooth at 3 Mbaud (bsd/dev/hk_bt.c).
+BLUETOOTH = os.environ.get('BLUETOOTH') == '1'
+if BLUETOOTH:
+    # ... all but BlueTool, whose built-in scripts are for the iPhone's Broadcom chips: this board's helper answers
+    # for it under its service name (src/btboot.c, com.hackios.bluetool)
+    DENY = tuple(word for word in DENY if word not in ('bluetooth', 'BTServer')) + ('com.apple.BlueTool',)
+JOB_ENVIRONMENT = {'com.apple.bluetoothd': {'BT_HCI_TRANSPORT': 'H4:POSIX:com.apple.uart.bluetooth,3000000'}} if BLUETOOTH else {}
+
 args = sys.argv[1:]
 rest = '--rest' in args
 root_volume = None              # the listing of the whole iOS volume, when that volume is the root
@@ -291,6 +303,8 @@ for label in labels:
     # a job that is named is wanted, whatever hardware it says it is for: wifid's asks for a node "wlan" in the
     # device tree, which the loader's tree does not have yet
     job.pop('_LimitLoadToDeviceTree', None)
+    if label in JOB_ENVIRONMENT:
+        job.setdefault('EnvironmentVariables', {}).update(JOB_ENVIRONMENT[label])
     if 'all' in oslog or label in oslog:
         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
     with open(f'{dest}/{label}.plist', 'wb') as f:
@@ -330,6 +344,8 @@ if rest:
         for variable in ('RWA_PACKED16',):
             if os.environ.get(variable):
                 job.setdefault('EnvironmentVariables', {})[variable] = os.environ[variable]
+        if label in JOB_ENVIRONMENT:
+            job.setdefault('EnvironmentVariables', {}).update(JOB_ENVIRONMENT[label])
         if label in oslog:
             job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
         with open(f'{dest}/{name}', 'wb') as f:

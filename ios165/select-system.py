@@ -140,7 +140,8 @@ BIG_PROGRAM = 10 << 20           # daemons bigger than this (locationd, lskdd, .
 # audio goes through, with its tunings (signal processing chains) for this model and for any, and the
 # system's own sounds. Not the neural networks among the tunings, nor the sounds of the watch.
 AUDIO = ('Library/Audio/Plug-Ins/', 'Library/Audio/Tunings/D22/', 'Library/Audio/Tunings/Generic/',
-         'System/Library/Audio/UISounds/')
+         'System/Library/Audio/UISounds/',
+         'System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver/')
 SKIP_AUDIO = ('System/Library/Audio/UISounds/nano/',)
 KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB')
 

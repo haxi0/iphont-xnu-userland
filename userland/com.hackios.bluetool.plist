@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hackios.bluetool</string>
+	<!-- BLUETOOTH=1: the boot helper bluetoothd asks for by BlueTool's service name, for this board's QCA6390
+	     (src/btboot.c); started when bluetoothd first asks -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/hackios/bin/btboot</string>
+	</array>
+	<key>MachServices</key>
+	<dict>
+		<key>com.apple.BlueTool</key>
+		<true/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

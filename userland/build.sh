@@ -116,6 +116,11 @@ IOS_JOBS=${JOBS-"
 # (Count a QEMU run log with its duplicate lines removed: run-ios.sh prints launchd's log twice.)
 # WIFID=0 leaves it out.
 [ "${WIFID-1}" != 0 ] && IOS_JOBS="$IOS_JOBS com.apple.wifid"
+# BLUETOOTH=1 (the OnePlus 8 with kernel boot-arg bt=1): iOS's Bluetooth, as on the iPhone -- bluetoothd from the
+# start, BlueTool and the rest when asked for (mkjobs.py: their place in DENY, bluetoothd's BT_HCI_TRANSPORT) --
+# and, in BlueTool's place, this board's boot helper (src/btboot.c, job com.hackios.bluetool). Off by default: on
+# a phone without the kernel's side, bluetoothd would only wait for a controller that never comes.
+[ "$BLUETOOTH" = 1 ] && IOS_JOBS="$IOS_JOBS com.apple.bluetoothd"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhackios.dylib, src/inject_sb.c is libhackios-sb.dylib, src/inject_media.c is
 # libhackios-media.dylib).
@@ -138,6 +143,8 @@ INJECT=${INJECT-"/hackios/lib/libhackios.dylib backboardd containermanagerd cont
 [ -n "$STOREFRONT" ] && INJECT="$INJECT
 /hackios/lib/libhackios-store.dylib appstored AppStore
 /hackios/lib/libhackios-fairplay.dylib fairplayd.H2"
+[ "$BLUETOOTH" = 1 ] && INJECT="$INJECT
+/hackios/lib/libhackios-bt.dylib bluetoothd"
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -204,6 +211,10 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -o obj/rwtouch src/rwtouch.c
 		# the kernel's thermal pressure passed on to iOS (src/thermald.c)
 		$DYN -o obj/thermald src/thermald.c
+		# the Bluetooth controller's boot helper, in BlueTool's place (src/btboot.c, BLUETOOTH=1)
+		$DYN -o obj/btboot src/btboot.c
+		$DYN -fobjc-arc -framework Foundation -Wl,-sectcreate,__TEXT,__info_plist,src/bt_scan.plist -o obj/bt_scan src/bt_scan.m
+		$DYN -dynamiclib -install_name /hackios/lib/libhackios-bt.dylib -o obj/libhackios-bt.dylib src/inject_bt.c
 		$DYN -fobjc-arc -framework Foundation -framework IOKit -o obj/iphontd src/iphontd.m
 		# (signed, if ldid is there: usernotificationsd takes notifications for an application only by an entitlement)
 		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c &&
@@ -384,6 +395,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	cp obj/hello_dyn obj/svc_test obj/surf_test obj/drawable_test obj/rwtouch obj/mg_test root/bin/
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/thermald ] && cp obj/thermald root/bin/
+	[ -f obj/btboot ] && cp obj/btboot root/bin/
+	[ -f obj/bt_scan ] && cp obj/bt_scan root/bin/
 	[ -f obj/iphontd ] && cp obj/iphontd root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
@@ -468,6 +481,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	# devfs is mounted on /dev, and init puts a ramfs on /private/var
 	mkdir -p root/dev root/private/var
 	mkdir -p root/lib
+	[ "$BLUETOOTH" != 1 ] || cp obj/libhackios-bt.dylib root/lib/
 	cp obj/libhackios.dylib obj/libhackios-sb.dylib root/lib/
 	[ -f obj/libhackios-media.dylib ] && cp obj/libhackios-media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhackios-store.dylib ] && cp obj/libhackios-store.dylib root/lib/
@@ -563,6 +577,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hackios.demo.plist com.hackios.wifi.plist com.hackios.thermald.plist com.iphont.agent.plist root/LaunchDaemons/
+	rm -f root/LaunchDaemons/com.hackios.bluetool.plist
+	[ "$BLUETOOTH" = 1 ] && cp com.hackios.bluetool.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $IOS/rootfs.slt ] && VOLUME="--root-volume $IOS/rootfs.slt"
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $IOS/rootfs root/LaunchDaemons $IOS_JOBS
@@ -599,6 +615,13 @@ if [ -f ../fw-wifi/wpss.mdt ] || [ -f ../fw-wifi/amss.bin ]; then
 	# ... and the radio's own address (one line, six bytes in hexadecimal with colons), which the kernel takes
 	# when it is not given wifi_mac=: an installed boot has no xl to pass it. The phone's, so left out as well
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/mac ]; then install -m 0600 ../fw-wifi/mac root/fw/mac; fi
+fi
+# ... and the OnePlus 8's Bluetooth: the QCA6390's RAM patch and configuration (htbtfw20.tlv, htnv20.bin; 190 KB),
+# the files of image/ in the phone's "bluetooth" partition (a FAT image), from ../fw-bt. The kernel loads them into
+# the chip itself (bsd/dev/hk_bt.c, bt=1) and gives it the address of the device tree's, not the file's.
+if ls ../fw-bt/htbtfw*.tlv >/dev/null 2>&1; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-bt/htbtfw*.tlv ../fw-bt/htnv*.bin root/fw/
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (bsd/dev/hk_haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either). The OnePlus 8's
@@ -658,12 +681,20 @@ fi
 # with flashboot.apfs resident; src/init.c, flash_root): an empty directory to hide iOS's
 # NanoLaunchDaemons and LaunchAngels with,
 # xpc without launchd.plist (launchd would read that list of all of iOS's jobs instead of
-# LaunchDaemons) and the audio server's plug-in directory with only our device in it.
+# LaunchDaemons) and the audio server's plug-in directory with our devices and opt-in Bluetooth audio.
 mkdir -p root/empty root/xpc root/hal
 for f in extensions.plist extensions.plist.sig; do
 	[ -f $IOS/rootfs/System/Library/xpc/$f ] && cp $IOS/rootfs/System/Library/xpc/$f root/xpc/
 done
 [ -d root/lib/HKAudio.driver ] && ln -s /hackios/lib/HKAudio.driver root/hal/HKAudio.driver
+if [ "$BLUETOOTH" = 1 ]; then
+	bt_hal="$IOS/rootfs/System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver"
+	[ -s "$bt_hal/BTAudioHALPlugin" ] && [ -f "$bt_hal/Info.plist" ] || {
+		echo "build.sh: BLUETOOTH=1 needs the original BTAudioHALPlugin.driver from ios165/rootfs.dmg" >&2
+		exit 1
+	}
+	cp -a "$bt_hal" root/hal/
+fi
 # ... and our Metal plug-in, for the union over the volume's /System/Library/Extensions (src/init.c)
 mkdir -p root/ext
 [ -d root/lib/HKMetal.bundle ] && ln -sfn /hackios/lib/HKMetal.bundle root/ext/HKMetal.bundle
@@ -844,9 +875,14 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		cp -aL "$app" sysroot/Applications/
 		echo "  ${app##*/} in /Applications ($(du -sm "$app" | cut -f1) MB from ../apps)"
 	done
-	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
+	# Our physical audio device; opt-in Bluetooth uses Apple's unmodified audio plug-in alongside it.
 	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
 	ln -s /hackios/lib/HKAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/HKAudio.driver
+	if [ "$BLUETOOTH" = 1 ]; then
+		cp -a "$bt_hal" sysroot/System/Library/Audio/Plug-Ins/HAL/
+	else
+		rm -rf sysroot/System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver
+	fi
 	# ... and our Metal plug-in, at the one path Metal's own discovery can open: step 3 composes
 	# "/System/Library/Extensions/" + MetalPluginName + ".bundle" and opens it with NSBundle
 	# (docs/metal.md 1). Same shape as the audio plug-in above -- a link into /hackios/lib, where

@@ -1,0 +1,9 @@
+# Bluetooth audio diagnosis (owner pairs the buds in Settings): the quiet A2DP tone once the route is there, then time for Voice Memos through the buds
+/hackios/bin/rwtouch frames 20 90
+/hackios/bin/rwtouch idle 60 20
+/hackios/bin/rwtouch mark boot-ok
+/hackios/bin/sound_test bluetooth-level 0.1 bluetooth-tone 300 route
+/hackios/bin/rwtouch mark tone-done
+/hackios/bin/rwtouch wait 240
+/hackios/bin/sound_test route
+/hackios/bin/rwtouch mark done
